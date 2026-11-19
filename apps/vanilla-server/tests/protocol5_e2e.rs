@@ -2979,50 +2979,147 @@ fn survival_shovel_mining_wears_out_last_use_and_persists_dirt_drop() {
     assert_eq!(drops["entries"].as_object().unwrap().len(), 1);
 }
 
+/// Observe the slot update and both packets announcing one thrown dirt entity.
+/// Keep candidates until all three arrive: slot, spawn and metadata are
+/// distinct messages, and waiting for one must not discard another.
+fn observe_thrown_dirt(
+    client: &mut TcpStream,
+    expected_slot: &[u8],
+    expected_count: u8,
+    previous_id: Option<i32>,
+) -> i32 {
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut slot_seen = false;
+    let mut spawn_ids = Vec::new();
+    let mut metadata_ids = Vec::new();
+    for _ in 0..MAX_PACKETS {
+        assert!(Instant::now() < deadline, "timed out observing thrown dirt");
+        let (id, body) = pump(client);
+        if id == 0x2f && body == expected_slot {
+            slot_seen = true;
+        } else if id == 0x0e {
+            let mut object = body.as_slice();
+            if let Ok(entity) = read_varint(&mut object) {
+                if let Ok(entity) = i32::try_from(entity) {
+                    if object.len() == 19
+                        && object[0] == 2
+                        && object[1..13]
+                            == [
+                                0, 0, 0, 16, // X = 0.5
+                                0, 0, 8, 16, // Y = 64.5
+                                0, 0, 0, 16, // Z = 0.5
+                            ]
+                        && entity > 1_000_000_000
+                        && Some(entity) != previous_id
+                    {
+                        spawn_ids.push(entity);
+                    }
+                }
+            }
+        } else if id == 0x1c
+            && body.len() == 13
+            && body[4..] == [0xaa, 0, 3, expected_count, 0, 0, 255, 255, 127]
+        {
+            metadata_ids.push(i32::from_be_bytes(body[..4].try_into().unwrap()));
+        }
+        if slot_seen {
+            if let Some(entity) = spawn_ids
+                .iter()
+                .find(|entity| metadata_ids.contains(entity))
+            {
+                return *entity;
+            }
+        }
+    }
+    panic!("missing slot update, object spawn, or matching dirt metadata");
+}
+
 #[test]
 fn native_protocol5_survival_q_and_ctrl_q_drop_authoritative_stacks() {
-    let server = NativeServer::start_with_mode(true);
+    // Independent full-server cases avoid assuming that a previous throw has
+    // not already been picked up. The same-session 1-then-11 sequence has a
+    // separate controlled session test; this test exercises the normal server.
+    for (action, drop_count, expected_slot) in [
+        (4u8, 1u8, &[0, 0, 36, 0, 3, 11, 0, 0, 255, 255][..]),
+        (3u8, 12u8, &[0, 0, 36, 255, 255][..]),
+    ] {
+        check_normal_server_throw(action, drop_count, expected_slot);
+    }
+}
+
+fn check_normal_server_throw(action: u8, drop_count: u8, expected_slot: &[u8]) {
+    let mut server =
+        NativeServer::start_with_stacks(true, &[("RustTester", vec![(36, 3, 12)])], false);
     let path = server
         .directory
         .join("players/rusttester.survival.inventory.json");
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let mut slots = vec![Value::Null; 45];
-    slots[36] = json!({"id":3,"count":12,"damage":0});
-    fs::write(
-        &path,
-        serde_json::to_vec(&json!({
-            "version": 1, "selected": 0, "slots": slots,
-            "cursor": null, "workbench": vec![Value::Null; 9]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let (mut client, _, _) = server.join("RustTester");
-    let mut packet = vec![4u8]; // Q: drop one
+    let (mut client, _, spawn) = server.join("RustTester");
+    assert_eq!(spawn, [0.5, 64.0, 0.5]);
+    let mut packet = vec![action];
     packet.extend_from_slice(&0i32.to_be_bytes());
     packet.push(0);
     packet.extend_from_slice(&0i32.to_be_bytes());
     packet.push(255);
     client.write_all(&frame(7, &packet)).unwrap();
-    until_packet(&mut client, 0x2f, |p| {
-        p.len() == 10 && p[0..3] == [0, 0, 36] && p[5] == 11
-    });
-    packet[0] = 3; // Ctrl+Q: drop remaining stack
-    client.write_all(&frame(7, &packet)).unwrap();
-    until_packet(&mut client, 0x2f, |p| p == [0, 0, 36, 255, 255]);
+    let entity_id = observe_thrown_dirt(&mut client, expected_slot, drop_count, None);
+
+    // The ground worker may merge or pick up items until the server exits.
+    // Read neither save until /stop has completed and all workers have joined.
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/stop\n")
+        .unwrap();
+    let reason = until_packet(&mut client, 0x40, |_| true);
+    assert!(String::from_utf8_lossy(&reason).contains("Server shutting down"));
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let exit = loop {
+        if let Some(exit) = server.process.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(Instant::now() < deadline, "server did not stop");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(exit.success(), "server failed graceful stop: {exit}");
     let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert!(saved["slots"][36].is_null());
+    let slots = saved["slots"].as_array().unwrap();
+    assert_eq!(slots.len(), 45);
+    assert!(slots
+        .iter()
+        .enumerate()
+        .all(|(i, slot)| i == 36 || slot.is_null()));
+    let inventory_count = if slots[36].is_null() {
+        0
+    } else {
+        assert_eq!(slots[36]["id"], 3);
+        assert_eq!(slots[36]["damage"], 0);
+        assert!(slots[36]["nbt"].is_null());
+        slots[36]["count"].as_u64().unwrap()
+    };
     let drops: Value =
         serde_json::from_slice(&fs::read(server.directory.join("flat.drops.json")).unwrap())
             .unwrap();
-    let mut counts: Vec<u64> = drops["entries"]
-        .as_object()
-        .unwrap()
-        .values()
-        .map(|value| value["stack"]["count"].as_u64().unwrap())
-        .collect();
-    counts.sort_unstable();
-    assert_eq!(counts, [1, 11]);
+    assert_eq!(drops["next_id"].as_i64(), Some(i64::from(entity_id)));
+    let entries = drops["entries"].as_object().unwrap();
+    assert!(entries.len() <= 1);
+    let mut ground_count = 0;
+    for (key, entry) in entries {
+        let id = key.parse::<i32>().unwrap();
+        assert_eq!(id, entity_id);
+        assert_eq!(entry["id"].as_i64(), Some(i64::from(id)));
+        assert_eq!(entry["position"], json!([16, 2064, 16]));
+        assert_eq!(entry["stack"]["id"], 3);
+        assert_eq!(entry["stack"]["damage"], 0);
+        assert!(entry["stack"]["nbt"].is_null());
+        ground_count = entry["stack"]["count"].as_u64().unwrap();
+    }
+    assert!(
+        (inventory_count == u64::from(12 - drop_count) && ground_count == u64::from(drop_count))
+            || (inventory_count == 12 && ground_count == 0),
+        "unexpected inventory/ground transition: {inventory_count}/{ground_count}"
+    );
 }
 
 #[test]

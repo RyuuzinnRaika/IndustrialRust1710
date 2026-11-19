@@ -59,6 +59,8 @@ mod online_auth;
 mod packet_stats;
 mod physics;
 mod player;
+#[cfg(test)]
+mod qdrop_session_tests;
 mod save_replace;
 mod scoreboard;
 mod security_limits;
@@ -1950,6 +1952,9 @@ fn play(
     let mut last_movement_trace = Instant::now() - Duration::from_secs(2);
     let mut last_look_trace = Instant::now() - Duration::from_secs(2);
     let mut last_movement_broadcast = Instant::now() - Duration::from_millis(50);
+    // The Hub replays equipment to observers that arrive later; the first
+    // publish primes the cache and every later publish is a silent diff.
+    let mut last_equipment_publish: Option<u64> = None;
     // Keep the final accepted pose when packet fanout is throttled. Snapshot
     // the angles too: a rejected C06 can change the parsing locals below.
     let mut pending_movement_broadcast: Option<(PlayerPosition, f32, f32)> = None;
@@ -2699,6 +2704,14 @@ fn play(
                 }
             }
         }
+        // Keep the Hub's equipment cache fresh (≤0.5s) so any observer that
+        // enters view distance right after a window click, a consume or a
+        // durability break still replays the true armor/held item. The diff
+        // sends nothing while equipment is unchanged.
+        if last_equipment_publish.is_none_or(|published| now_tick.saturating_sub(published) >= 10) {
+            hub.set_equipment(entity_id, inventory.equipment());
+            last_equipment_publish = Some(now_tick);
+        }
         // The first active session advances the shared mob simulation.
         if vitals.health > 0.0 {
             let participants = hub.participants()?;
@@ -2879,7 +2892,10 @@ fn play(
                 if survival && landed_distance >= 1.0 {
                     let (fx, fy, fz) = (
                         candidate.x.floor() as i32,
-                        candidate.y.floor() as i32 - 1,
+                        // Same 1/16 support tolerance as the client-path
+                        // trample probe: a silent landing on farmland rests
+                        // at cell + 0.9375, not on the integer boundary.
+                        (candidate.y + physics::GROUND_TOLERANCE).floor() as i32 - 1,
                         candidate.z.floor() as i32,
                     );
                     let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -4223,7 +4239,11 @@ fn play(
                 if survival {
                     let fx = x.floor() as i32;
                     let fz = z.floor() as i32;
-                    let fy = y.floor() as i32 - 1;
+                    // Farmland's collision top is 15/16, so a supported
+                    // landing can rest at cell + 0.9375. Include the same
+                    // 1/16 tolerance as support_top so the soil cell the
+                    // feet actually stand on is probed, not its basement.
+                    let fy = (y + physics::GROUND_TOLERANCE).floor() as i32 - 1;
                     // A fall of at least one block onto farmland tramples it.
                     if fy >= 0 && landing_distance >= 1.0 {
                         let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -6789,6 +6809,9 @@ fn play(
                 input.finish()?;
                 inventory.select(selected)?;
                 inventory.save(inventory_path)?;
+                // The held item is visible equipment: peers in view must see
+                // the swap without waiting for the periodic refresh.
+                hub.set_equipment(entity_id, inventory.equipment());
             }
             16 => {
                 let slot = input.i16()?;
@@ -6806,6 +6829,9 @@ fn play(
                             // Persist only an accepted inventory mutation.
                             inventory.save(inventory_path)?;
                             send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                            // A granted stack may land in the held slot or an
+                            // armor slot: publish equipment immediately.
+                            hub.set_equipment(entity_id, inventory.equipment());
                         } else {
                             send(s, 0x30, &inventory.window_items())?;
                         }
@@ -7625,6 +7651,9 @@ fn play(
                     send(s, 0x1f, &experience.packet())?;
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
+                    // Death dropped (or kept) every worn piece: overwrite the
+                    // observers' stale equipment state for all five slots.
+                    hub.set_equipment(entity_id, inventory.equipment());
                     send_player_position(s, player, yaw, pitch)?;
                     pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                     hub.move_player(entity_id, *player, yaw, pitch);
@@ -8158,6 +8187,14 @@ fn handle(
             {
                 let spawn = multiplayer::spawn(other)?;
                 send(&mut s, spawn.id, &spawn.body)?;
+                // Equipment changed before this session existed: replay the
+                // Hub-tracked snapshot immediately after the Spawn.
+                for (slot, item) in other.equipment.iter().enumerate() {
+                    if let Some(stack) = item {
+                        let event = multiplayer::equipment(other.id, slot as i16, Some(*stack));
+                        send(&mut s, event.id, &event.body)?;
+                    }
+                }
             }
         }
         // Send world-owned entities to players in either game mode.
