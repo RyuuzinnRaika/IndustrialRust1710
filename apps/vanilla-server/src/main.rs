@@ -1955,6 +1955,25 @@ fn play(
     // The Hub replays equipment to observers that arrive later; the first
     // publish primes the cache and every later publish is a silent diff.
     let mut last_equipment_publish: Option<u64> = None;
+    // Derived riding truth across all three mount registries. The Hub's
+    // tracked mount must mirror the server's authoritative state exactly,
+    // so view-entry Attach replays never resurrect a finished ride.
+    let current_mount = || -> io::Result<Option<i32>> {
+        let creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+        if let Some(vehicle) = creatures.mount_of(entity_id) {
+            return Ok(Some(vehicle));
+        }
+        drop(creatures);
+        let water = boats.lock().map_err(|_| bad("boats mutex poisoned"))?;
+        if let Some(vehicle) = water.boat_for(entity_id) {
+            return Ok(Some(vehicle));
+        }
+        drop(water);
+        let carts = minecarts
+            .lock()
+            .map_err(|_| bad("minecarts mutex poisoned"))?;
+        Ok(carts.cart_for(entity_id))
+    };
     // Keep the final accepted pose when packet fanout is throttled. Snapshot
     // the angles too: a rejected C06 can change the parsing locals below.
     let mut pending_movement_broadcast: Option<(PlayerPosition, f32, f32)> = None;
@@ -2704,12 +2723,13 @@ fn play(
                 }
             }
         }
-        // Keep the Hub's equipment cache fresh (≤0.5s) so any observer that
-        // enters view distance right after a window click, a consume or a
-        // durability break still replays the true armor/held item. The diff
-        // sends nothing while equipment is unchanged.
+        // Keep the Hub's equipment and mount caches fresh (≤0.5s) so any
+        // observer that enters view distance right after a window click, a
+        // consume, a durability break or a remote boat break still replays
+        // the true state. The diffs send nothing while nothing changed.
         if last_equipment_publish.is_none_or(|published| now_tick.saturating_sub(published) >= 10) {
             hub.set_equipment(entity_id, inventory.equipment());
+            hub.set_mount(entity_id, current_mount()?);
             last_equipment_publish = Some(now_tick);
         }
         // The first active session advances the shared mob simulation.
@@ -3613,6 +3633,7 @@ fn play(
                             .mount(target_id, entity_id, *player)
                         {
                             hub.broadcast(attach);
+                            hub.set_mount(entity_id, Some(target_id));
                             continue;
                         }
                     }
@@ -3622,6 +3643,7 @@ fn play(
                         .mount(target_id, entity_id, *player)
                     {
                         hub.broadcast(attach);
+                        hub.set_mount(entity_id, Some(target_id));
                         continue;
                     }
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
@@ -3718,6 +3740,7 @@ fn play(
                             for event in events {
                                 hub.broadcast(event);
                             }
+                            hub.set_mount(entity_id, Some(target_id));
                             continue;
                         }
                     }
@@ -4541,6 +4564,10 @@ fn play(
                     {
                         hub.broadcast(event);
                     }
+                    // Re-derive rather than assume: a cart whose every safe
+                    // candidate was blocked re-attaches the rider, so the
+                    // Hub must track the surviving ride, not None.
+                    hub.set_mount(entity_id, current_mount()?);
                 } else if !state.control(entity_id, sideways, forward, yaw) {
                     drop(state);
                     if minecarts
