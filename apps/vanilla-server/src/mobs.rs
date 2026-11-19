@@ -2545,6 +2545,14 @@ impl Mobs {
                 ..mob.position
             })
     }
+    /// The Mob entity this rider currently sits on, for the Hub's tracked
+    /// mount cache (view-entry Attach replays read that cache).
+    pub fn mount_of(&self, rider: i32) -> Option<i32> {
+        self.entities
+            .values()
+            .find(|mob| mob.rider == Some(rider))
+            .map(|mob| mob.id)
+    }
     pub fn is_riding(&self, rider: i32) -> bool {
         self.rider_position(rider).is_some()
     }
