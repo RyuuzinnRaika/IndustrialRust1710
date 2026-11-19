@@ -2,9 +2,11 @@
 import importlib.util
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -158,6 +160,108 @@ class RestoreDrillTests(unittest.TestCase):
         (self.backup / "flat.irw").write_bytes(b"IRW3 fixture")
         (self.backup / "players").mkdir()
         (self.backup / "players" / "user.dat").write_bytes(b"player")
+
+    def test_reparse_points_are_rejected_before_copy_or_native_verification(self):
+        # A Windows junction reports S_ISDIR even when lstat does not follow it.
+        # Inject the attribute independently of platform and include the marker,
+        # which is read before the normal tree scan.
+        real_lstat = Path.lstat
+        real_open = Path.open
+        for target in (self.backup, self.backup / ".industrial1710-backup",
+                       self.backup / "players", self.backup / "players" / "user.dat"):
+            with self.subTest(target=target):
+                def lstat_with_reparse(path, *args, **kwargs):
+                    metadata = real_lstat(path, *args, **kwargs)
+                    if path == target:
+                        return SimpleNamespace(st_mode=metadata.st_mode, st_size=metadata.st_size,
+                                               st_file_attributes=0x400)
+                    return metadata
+
+                def guard_open(path, *args, **kwargs):
+                    if path == target or path.is_relative_to(target):
+                        raise AssertionError("read crossed a reparse point")
+                    return real_open(path, *args, **kwargs)
+
+                with patch.object(Path, "lstat", new=lstat_with_reparse), \
+                     patch.object(Path, "open", new=guard_open), \
+                     patch.object(module.shutil, "copytree") as copytree, \
+                     patch.object(module.subprocess, "run") as native:
+                    with self.assertRaisesRegex(ValueError, "reparse"):
+                        module.verify_restore_point(self.server, self.backup)
+                    copytree.assert_not_called()
+                    native.assert_not_called()
+
+    def test_windows_symlink_keeps_the_existing_link_diagnostic(self):
+        target = self.backup / "players" / "user.dat"
+        real_lstat = Path.lstat
+
+        def lstat_with_windows_symlink(path, *args, **kwargs):
+            metadata = real_lstat(path, *args, **kwargs)
+            if path == target:
+                return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777,
+                                       st_size=metadata.st_size, st_file_attributes=0x400)
+            return metadata
+
+        with patch.object(Path, "lstat", new=lstat_with_windows_symlink):
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                module.verify_restore_point(self.server, self.backup)
+
+    def test_level_dat_reparse_point_is_rejected_before_format_detection(self):
+        target = self.backup / "level.dat"
+        target.write_bytes(b"synthetic")
+        real_lstat = Path.lstat
+        real_is_file = Path.is_file
+
+        def lstat_with_reparse(path, *args, **kwargs):
+            metadata = real_lstat(path, *args, **kwargs)
+            if path == target:
+                return SimpleNamespace(st_mode=metadata.st_mode, st_size=metadata.st_size,
+                                       st_file_attributes=0x400)
+            return metadata
+
+        def guard_is_file(path):
+            if path == target:
+                raise AssertionError("format detection followed a reparse point")
+            return real_is_file(path)
+
+        with patch.object(Path, "lstat", new=lstat_with_reparse), \
+             patch.object(Path, "is_file", new=guard_is_file):
+            with self.assertRaisesRegex(ValueError, "reparse"):
+                module.verify_restore_point(self.server, self.backup)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction test")
+    def test_windows_junction_is_rejected_without_reading_target(self):
+        outside = self.base / "outside"
+        outside.mkdir()
+        sentinel = outside / "synthetic.txt"
+        sentinel.write_bytes(b"external synthetic fixture")
+        junction = self.backup / "junction"
+        env = os.environ.copy()
+        env["RESTORE_TEST_JUNCTION"] = str(junction)
+        env["RESTORE_TEST_TARGET"] = str(outside)
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+             "New-Item -ItemType Junction -Path $env:RESTORE_TEST_JUNCTION "
+             "-Target $env:RESTORE_TEST_TARGET -ErrorAction Stop | Out-Null"],
+            env=env, capture_output=True, check=False,
+        )
+        if result.returncode:
+            self.skipTest("cannot create Windows junction in this environment")
+        real_open = Path.open
+
+        def guard_open(path, *args, **kwargs):
+            if path == junction or path.is_relative_to(junction):
+                raise AssertionError("read crossed a junction")
+            return real_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", new=guard_open), \
+             patch.object(module.shutil, "copytree") as copytree, \
+             patch.object(module.subprocess, "run") as native:
+            with self.assertRaisesRegex(ValueError, "reparse"):
+                module.verify_restore_point(self.server, self.backup)
+            copytree.assert_not_called()
+            native.assert_not_called()
+        self.assertEqual(sentinel.read_bytes(), b"external synthetic fixture")
 
     @patch.object(module.subprocess, "run")
     def test_drill_uses_isolated_copy_then_disposes_it(self, run):

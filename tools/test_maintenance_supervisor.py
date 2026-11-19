@@ -1,6 +1,7 @@
 """Standard-library tests for the optional J92 maintenance supervisor."""
 import importlib.util
 import io
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -123,6 +124,66 @@ class RetentionSafetyTests(unittest.TestCase):
         (folder / ".industrial1710-backup").write_bytes(module.BACKUP_MARKER)
         (folder / "flat.irw").write_bytes(b"existing-backup")
         return folder
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction test")
+    def test_junction_rejection_stops_supervisor_without_pruning_or_restart(self):
+        first = self.generation("backup-100-1")
+        new = self.backups / "backup-200-1"
+        outside = self.root / "outside"
+        outside.mkdir()
+        sentinel = outside / "synthetic.txt"
+        sentinel.write_bytes(b"external synthetic fixture")
+        self.server.write_bytes(b"synthetic server")
+        real_run = subprocess.run
+        calls = []
+        verifier_errors = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            if len(calls) == 2:
+                self.generation(new.name)
+                env = os.environ.copy()
+                env["RESTORE_TEST_JUNCTION"] = str(new / "junction")
+                env["RESTORE_TEST_TARGET"] = str(outside)
+                result = real_run(
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                     "New-Item -ItemType Junction -Path $env:RESTORE_TEST_JUNCTION "
+                     "-Target $env:RESTORE_TEST_TARGET -ErrorAction Stop | Out-Null"],
+                    env=env, capture_output=True, check=False,
+                )
+                if result.returncode:
+                    self.skipTest("cannot create Windows junction in this environment")
+            elif len(calls) == 3:
+                try:
+                    return real_run(argv, check=True, capture_output=True, text=True)
+                except subprocess.CalledProcessError as error:
+                    verifier_errors.append(error.stderr)
+                    raise
+
+        class RunningChild:
+            def poll(self):
+                return None
+
+        runner = module.Supervisor(["synthetic-server"], self.server, self.world,
+                                   self.backups, 1, 0, 5)
+        with patch.object(module.subprocess, "run", side_effect=fake_run), \
+             patch.object(module, "prune_verified_backups") as prune, \
+             patch.object(runner, "_launch", return_value=RunningChild()) as launch, \
+             patch.object(runner, "_stop") as stop, \
+             patch.object(runner, "_console"), \
+             patch.object(module.time, "monotonic", return_value=0), \
+             patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(runner.run(), 1)
+        self.assertIn("FAILED CLOSED", stderr.getvalue())
+        self.assertEqual(len(verifier_errors), 1, (stderr.getvalue(), calls))
+        self.assertIn("reparse", verifier_errors[0])
+        self.assertEqual(len(calls), 3)
+        launch.assert_called_once()
+        stop.assert_called_once()
+        prune.assert_not_called()
+        self.assertTrue(first.is_dir())
+        self.assertTrue(new.is_dir())
+        self.assertEqual(sentinel.read_bytes(), b"external synthetic fixture")
 
     def test_restore_failure_preserves_all_earlier_generations(self):
         first = self.generation("backup-100-1")
