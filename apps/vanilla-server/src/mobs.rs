@@ -12,6 +12,10 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+#[path = "mobs/issue1117_creeper_peaceful.rs"]
+mod issue1117_creeper_peaceful;
+
 const BASE_ID: i32 = 500_000;
 const MAX_STEPS: u64 = 4;
 const ATTACK_INTERVAL: u64 = 20;
