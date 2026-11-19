@@ -3,6 +3,10 @@
 //! Does not yet implement potions, item NBT, food effects or full sprint logic.
 use crate::inventory::Stack;
 
+#[cfg(test)]
+#[path = "vitals/issue1103_matrix.rs"]
+mod issue1103_matrix;
+
 /// Legacy, server-authoritative status effects added by consuming food.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FoodEffect {
@@ -192,7 +196,9 @@ impl Vitals {
                 2 => 1.0,
                 _ => 0.0,
             };
-            let starving = self.food == 0 && self.health > minimum_health;
+            // Keep the cadence while at a difficulty's starvation floor:
+            // changing difficulty must not restart the existing food timer.
+            let starving = self.food == 0;
             if recovering || starving {
                 self.food_timer += 1;
                 if self.food_timer >= 80 {
@@ -200,8 +206,11 @@ impl Vitals {
                     if recovering {
                         self.health = (self.health + 1.0).min(20.0);
                         self.add_exhaustion(3.0);
-                    } else {
+                    } else if self.health > minimum_health {
                         self.health = (self.health - 1.0).max(minimum_health);
+                        if self.health <= 0.0 {
+                            break;
+                        }
                     }
                 }
             } else {
