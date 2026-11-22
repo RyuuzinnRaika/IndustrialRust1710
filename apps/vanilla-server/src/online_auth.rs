@@ -283,20 +283,27 @@ fn signed_server_hash(secret: &[u8; 16], der: &[u8]) -> String {
 }
 
 fn verify_has_joined(username: &str, hash: &str) -> io::Result<VerifiedProfile> {
+    verify_has_joined_with(username, hash, |url| {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(5))
+            .redirects(0)
+            .build();
+        agent.get(url).call()
+    })
+}
+
+fn verify_has_joined_with<E>(
+    username: &str,
+    hash: &str,
+    send: impl FnOnce(&str) -> Result<ureq::Response, E>,
+) -> io::Result<VerifiedProfile> {
     if !crate::whitelist::valid_name(username) {
         return Err(invalid("invalid account name"));
     }
     let url = format!(
         "https://sessionserver.mojang.com/session/minecraft/hasJoined?username={username}&serverId={hash}"
     );
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(5))
-        .redirects(0)
-        .build();
-    let response = agent
-        .get(&url)
-        .call()
-        .map_err(|_| invalid("session verification unavailable"))?;
+    let response = send(&url).map_err(|_| invalid("session verification unavailable"))?;
     if response.status() != 200 {
         return Err(invalid("account not authenticated by session server"));
     }
@@ -513,6 +520,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn injected_session_responses_preserve_authentication_checks() {
+        let body = r#"{"name":"RustTester","id":"0123456789abcdef0123456789abcdef"}"#;
+        let profile = verify_has_joined_with("RustTester", "test-hash", |_url| {
+            ureq::Response::new(200, "OK", body)
+        })
+        .unwrap();
+        assert_eq!(profile.name, "RustTester");
+        assert_eq!(profile.uuid, "01234567-89ab-cdef-0123-456789abcdef");
+
+        let rejected = verify_has_joined_with("RustTester", "test-hash", |_url| {
+            ureq::Response::new(204, "No Content", "")
+        });
+        assert!(rejected.is_err());
+        let malformed = verify_has_joined_with("RustTester", "test-hash", |_url| {
+            ureq::Response::new(200, "OK", "not json")
+        });
+        assert!(malformed.is_err());
+        let oversized = "x".repeat(16_385);
+        let too_large = verify_has_joined_with("RustTester", "test-hash", |_url| {
+            ureq::Response::new(200, "OK", &oversized)
+        });
+        assert!(too_large.is_err());
+    }
+
     /// ADD-073 / #498: online-mode login fails closed. A hostile, empty or
     /// truncated Encryption Response aborts verification on a live loopback
     /// connection before the socket ever switches to AES, so the login
@@ -614,7 +646,9 @@ mod tests {
         // Canary filler for hostile encrypted bodies and hostile bodies read
         // back through the bounded session reader.
         let canary = "deadbeef";
-        let filler: [u8; 128] = core::array::from_fn(|index| [0xDE, 0xAD, 0xBE, 0xEF][index % 4]);
+        // This 129-byte integer is larger than any generated 1024-bit RSA
+        // modulus, so decryption rejects it before session-server access.
+        let filler = [0xffu8; 129];
         let filler_hex = hex(&filler);
 
         // Live login faults over a loopback connection: the returned error is
@@ -636,8 +670,8 @@ mod tests {
                     let mut hostile = Vec::new();
                     match case {
                         0 => {
-                            // Undecryptable RSA blobs stuffed with the canary.
-                            hostile.extend_from_slice(&128u16.to_be_bytes());
+                            // An out-of-range ciphertext fails RSA decryption.
+                            hostile.extend_from_slice(&(filler.len() as u16).to_be_bytes());
                             hostile.extend_from_slice(&filler);
                             hostile.extend_from_slice(&4u16.to_be_bytes());
                             hostile.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
@@ -679,21 +713,35 @@ mod tests {
         // session key, the response body may echo tokens; neither may reach
         // the log line.
         let server_hash = signed_server_hash(&[0x33u8; 16], &identity.der);
-        let error = match verify_has_joined("RustTester", &server_hash) {
-            Ok(profile) => panic!("this host cannot own a Mojang session: {}", profile.uuid),
+        let called = std::cell::Cell::new(false);
+        let error = match verify_has_joined_with("RustTester", &server_hash, |url| {
+            called.set(true);
+            assert!(url.starts_with("https://sessionserver.mojang.com/session/minecraft/hasJoined?username=RustTester&serverId="));
+            assert!(url.ends_with(&server_hash));
+            Err::<ureq::Response, _>(io::Error::other(format!("upstream {url} token={canary}")))
+        }) {
+            Ok(profile) => panic!("a failed transport cannot verify: {}", profile.uuid),
             Err(error) => error,
         };
+        assert!(called.get());
         let line = worker_log_line(&error);
         assert!(
-            !line.contains(&server_hash),
-            "the server hash must never be logged: {line}"
+            !line.contains(&server_hash)
+                && !line.contains(canary)
+                && !line.contains("sessionserver"),
+            "the transport error must not be logged: {line}"
         );
-        // A malformed name never even reaches the URL, and its message is
+        // A malformed name never even reaches the transport, and its message is
         // static (no hash, no name).
-        let error = match verify_has_joined("a", &server_hash) {
+        let called = std::cell::Cell::new(false);
+        let error = match verify_has_joined_with("a", &server_hash, |_url| {
+            called.set(true);
+            Err::<ureq::Response, _>(io::Error::other("transport must not be called"))
+        }) {
             Ok(profile) => panic!("invalid name must never verify: {}", profile.uuid),
             Err(error) => error,
         };
+        assert!(!called.get());
         let line = worker_log_line(&error);
         assert!(
             !line.contains(&server_hash) && !line.contains("sessionserver"),
