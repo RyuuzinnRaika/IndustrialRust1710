@@ -1,5 +1,6 @@
 """Restore drills never mutate the original, trust an unmarked tree, or claim GUI acceptance."""
 import importlib.util
+import io
 import os
 from pathlib import Path
 import stat
@@ -228,6 +229,57 @@ class RestoreDrillTests(unittest.TestCase):
              patch.object(Path, "is_file", new=guard_is_file):
             with self.assertRaisesRegex(ValueError, "reparse"):
                 module.verify_restore_point(self.server, self.backup)
+
+    def test_marker_check_is_bounded_and_handles_short_reads(self):
+        marker = self.backup / ".industrial1710-backup"
+
+        class ShortReader(io.BytesIO):
+            def __init__(self, content):
+                super().__init__(content)
+                self.returned = 0
+
+            def read(self, size=-1):
+                if size < 0:
+                    raise AssertionError("unbounded marker read")
+                result = super().read(min(size, 3))
+                self.returned += len(result)
+                if self.returned > len(module.MARKER) + 1:
+                    raise AssertionError("marker read exceeded bound")
+                return result
+
+        for content, expected in ((module.MARKER, True), (module.MARKER + b"x" * 10000, False),
+                                  (module.MARKER[:-1], False), (b"", False)):
+            with self.subTest(length=len(content)):
+                stream = ShortReader(content)
+                with patch.object(Path, "open", return_value=stream):
+                    self.assertEqual(module._marker_matches(marker), expected)
+                self.assertLessEqual(stream.returned, len(module.MARKER) + 1)
+
+    def test_marker_read_error_fails_closed(self):
+        marker = self.backup / ".industrial1710-backup"
+        with patch.object(Path, "open", side_effect=OSError("synthetic read error")):
+            with self.assertRaises(OSError):
+                module._marker_matches(marker)
+
+        class WouldBlock(io.BytesIO):
+            def read(self, size=-1):
+                return None
+
+        with patch.object(Path, "open", return_value=WouldBlock()):
+            with self.assertRaises(BlockingIOError):
+                module._marker_matches(marker)
+
+    def test_oversized_marker_is_rejected_before_tree_scan(self):
+        marker = self.backup / ".industrial1710-backup"
+        marker.write_bytes(module.MARKER + b"x" * (1024 * 1024))
+        with patch.object(module, "snapshot_hashes") as scan, \
+             patch.object(module.shutil, "copytree") as copytree, \
+             patch.object(module.subprocess, "run") as native:
+            with self.assertRaisesRegex(ValueError, "marker"):
+                module.verify_restore_point(self.server, self.backup)
+            scan.assert_not_called()
+            copytree.assert_not_called()
+            native.assert_not_called()
 
     @unittest.skipUnless(os.name == "nt", "Windows junction test")
     def test_windows_junction_is_rejected_without_reading_target(self):
