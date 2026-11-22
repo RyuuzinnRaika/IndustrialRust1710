@@ -3,12 +3,14 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-struct Server(Child);
+// The logs belong to the test's create-only scratch directory. They remain
+// there on panic, including when a server exits before a graceful stop.
+struct Server(Child, &'static str, PathBuf, PathBuf);
 
 impl Drop for Server {
     fn drop(&mut self) {
@@ -34,14 +36,33 @@ fn temporary_loopback_port() -> u16 {
     probe.local_addr().unwrap().port()
 }
 
-fn launch(exe: &str, world: &Path, whitelist: &Path, port: u16) -> Server {
+fn launch(
+    exe: &str,
+    world: &Path,
+    whitelist: &Path,
+    port: u16,
+    scratch: &Path,
+    label: &'static str,
+) -> Server {
     let bind = format!("127.0.0.1:{port}");
+    let stdout_path = scratch.join(format!("{label}.stdout.log"));
+    let stderr_path = scratch.join(format!("{label}.stderr.log"));
+    let open_log = |path: &Path| {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("create isolated server log")
+    };
+    let stdout = open_log(&stdout_path);
+    let stderr = open_log(&stderr_path);
     let child = command(exe, world, whitelist, &bind)
         .stdin(Stdio::piped())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
         .spawn()
         .expect("spawn isolated vanilla-server");
-    Server(child)
+    Server(child, label, stdout_path, stderr_path)
 }
 
 fn wait_for_world(server: &mut Server, world: &Path, lock_path: &Path, port: u16) {
@@ -112,11 +133,20 @@ fn stop(server: &mut Server) {
         if let Some(status) = server.0.try_wait().unwrap() {
             assert!(
                 status.success(),
-                "server failed graceful shutdown: {status}"
+                "{} failed graceful shutdown: {status}; stdout: {}; stderr: {}",
+                server.1,
+                server.2.display(),
+                server.3.display()
             );
             return;
         }
-        assert!(Instant::now() < deadline, "server did not stop gracefully");
+        assert!(
+            Instant::now() < deadline,
+            "{} did not stop gracefully; stdout: {}; stderr: {}",
+            server.1,
+            server.2.display(),
+            server.3.display()
+        );
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -138,7 +168,7 @@ fn reg184_second_process_cannot_rewrite_a_live_world_and_lock_is_released() {
 
     let exe = env!("CARGO_BIN_EXE_vanilla-server");
     let initial_port = temporary_loopback_port();
-    let mut first = launch(exe, &world, &whitelist, initial_port);
+    let mut first = launch(exe, &world, &whitelist, initial_port, &scratch, "initial");
     wait_for_world(&mut first, &world, &lock_path, initial_port);
     let world_before = fs::read(&world).unwrap();
 
@@ -169,7 +199,14 @@ fn reg184_second_process_cannot_rewrite_a_live_world_and_lock_is_released() {
     stop(&mut first);
     drop(first);
     let restarted_port = temporary_loopback_port();
-    let mut restarted = launch(exe, &world, &whitelist, restarted_port);
+    let mut restarted = launch(
+        exe,
+        &world,
+        &whitelist,
+        restarted_port,
+        &scratch,
+        "restarted",
+    );
     wait_for_world(&mut restarted, &world, &lock_path, restarted_port);
     stop(&mut restarted);
     drop(restarted);
@@ -196,7 +233,7 @@ fn add065_abrupt_owner_death_releases_lock_without_trusting_a_stale_pid() {
     let exe = env!("CARGO_BIN_EXE_vanilla-server");
 
     let initial_port = temporary_loopback_port();
-    let mut original = launch(exe, &world, &whitelist, initial_port);
+    let mut original = launch(exe, &world, &whitelist, initial_port, &scratch, "initial");
     wait_for_world(&mut original, &world, &lock_path, initial_port);
     assert!(world.is_file());
 
@@ -219,7 +256,7 @@ fn add065_abrupt_owner_death_releases_lock_without_trusting_a_stale_pid() {
     // the exclusive file lock when the killed process exits, without checking
     // or trusting a possibly reused process ID.
     let restart_port = temporary_loopback_port();
-    let mut restarted = launch(exe, &world, &whitelist, restart_port);
+    let mut restarted = launch(exe, &world, &whitelist, restart_port, &scratch, "restarted");
     wait_for_world(&mut restarted, &world, &lock_path, restart_port);
     let (status, stderr) = denied_second_start(exe, &world, &whitelist);
     assert!(
