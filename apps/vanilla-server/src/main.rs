@@ -56,6 +56,8 @@ mod multiplayer;
 mod native_tile_export;
 mod navigation;
 mod online_auth;
+#[cfg(test)]
+mod online_handler_fake_tests;
 mod packet_stats;
 mod physics;
 mod player;
@@ -7904,6 +7906,20 @@ fn handle(
     context: ServerContext,
     login_permit: security_limits::Permit,
 ) -> io::Result<()> {
+    handle_with_auth(s, context, login_permit, |identity, socket, username| {
+        identity.authenticate(socket, username)
+    })
+}
+
+fn handle_with_auth<F>(
+    s: TcpStream,
+    context: ServerContext,
+    login_permit: security_limits::Permit,
+    authenticate: F,
+) -> io::Result<()>
+where
+    F: FnOnce(&ServerIdentity, &mut Connection, &str) -> io::Result<online_auth::VerifiedProfile>,
+{
     let ServerContext {
         hub,
         login_names,
@@ -8020,7 +8036,7 @@ fn handle(
         let key = auth_key
             .as_ref()
             .ok_or_else(|| bad("missing online-mode RSA identity"))?;
-        let profile = key.authenticate(&mut s, &name)?;
+        let profile = authenticate(key, &mut s, &name)?;
         (profile.name, profile.uuid)
     } else {
         let uuid = offline_uuid(&name);

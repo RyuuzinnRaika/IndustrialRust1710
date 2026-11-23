@@ -64,6 +64,11 @@ impl Connection {
         self.reader = Some(Cfb8::new(secret, false));
         self.writer = Some(Cfb8::new(secret, true));
     }
+
+    #[cfg(test)]
+    pub(super) fn enable_test_encryption(&mut self, secret: &[u8; 16]) {
+        self.encrypted(secret);
+    }
 }
 impl Deref for Connection {
     type Target = TcpStream;
@@ -185,6 +190,16 @@ impl ServerIdentity {
         username: &str,
     ) -> io::Result<VerifiedProfile> {
         self.authenticate_with(socket, username, verify_has_joined)
+    }
+
+    #[cfg(test)]
+    pub(super) fn authenticate_with_test_verifier(
+        &self,
+        socket: &mut Connection,
+        username: &str,
+        verifier: impl FnOnce(&str, &str) -> io::Result<VerifiedProfile>,
+    ) -> io::Result<VerifiedProfile> {
+        self.authenticate_with(socket, username, verifier)
     }
 
     fn authenticate_with(
