@@ -58,7 +58,12 @@ fn profile() -> VerifiedProfile {
     }
 }
 
-fn exchange<V, A, T>(identity: &ServerIdentity, verifier: V, action: A) -> (T, Outcome)
+fn exchange<V, A, T>(
+    identity: &ServerIdentity,
+    probe_success: bool,
+    verifier: V,
+    action: A,
+) -> (T, Outcome)
 where
     V: FnOnce(&str, &str) -> io::Result<VerifiedProfile> + Send,
     A: FnOnce(&mut Connection, &Request) -> T,
@@ -95,7 +100,7 @@ where
             let result = identity.authenticate_with(&mut server, NAME, verifier);
             let encrypted_reader = server.reader.is_some();
             let encrypted_writer = server.writer.is_some();
-            if result.is_ok() {
+            if result.is_ok() && probe_success {
                 // Probe the encrypted Connection itself; this is not Login Success.
                 send(&mut server, 0x7e, PROBE).unwrap();
                 let (id, payload) = crate::receive(&mut server).unwrap();
@@ -130,6 +135,7 @@ fn accepted_challenge_calls_fake_and_enables_encrypted_stream() {
     let calls = AtomicUsize::new(0);
     let (_, outcome) = exchange(
         &identity,
+        true,
         |name, hash| {
             calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(name, NAME);
@@ -172,6 +178,7 @@ fn verifier_failure_after_valid_challenge_does_not_return_profile() {
     let calls = AtomicUsize::new(0);
     let (_, outcome) = exchange(
         &identity,
+        false,
         |name, hash| {
             calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(name, NAME);
@@ -202,6 +209,7 @@ fn mismatched_challenge_never_enables_cipher_or_calls_verifier() {
     let calls = AtomicUsize::new(0);
     let (_, outcome) = exchange(
         &identity,
+        false,
         |_, _| {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok(profile())
@@ -226,6 +234,7 @@ fn replayed_response_is_rejected_before_cipher_or_verifier() {
     let accepted_calls = AtomicUsize::new(0);
     let ((first, bytes), accepted) = exchange(
         &identity,
+        true,
         |name, hash| {
             accepted_calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(name, NAME);
@@ -253,6 +262,7 @@ fn replayed_response_is_rejected_before_cipher_or_verifier() {
         let calls = AtomicUsize::new(0);
         let (distinct, replay) = exchange(
             &identity,
+            false,
             |_, _| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(profile())
@@ -287,6 +297,7 @@ fn silent_peer_times_out_before_cipher_or_verifier() {
     let calls = AtomicUsize::new(0);
     let (_, outcome) = exchange(
         &identity,
+        false,
         |_, _| {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok(profile())
