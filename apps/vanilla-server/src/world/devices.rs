@@ -5,6 +5,10 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
+#[cfg(test)]
+#[path = "issue475_repeater_matrix.rs"]
+mod issue475_repeater_matrix;
+
 const NEIGHBORS: [(i32, i32, i32); 6] = [
     (1, 0, 0),
     (-1, 0, 0),
