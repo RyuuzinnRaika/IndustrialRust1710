@@ -184,6 +184,15 @@ impl ServerIdentity {
         socket: &mut Connection,
         username: &str,
     ) -> io::Result<VerifiedProfile> {
+        self.authenticate_with(socket, username, verify_has_joined)
+    }
+
+    fn authenticate_with(
+        &self,
+        socket: &mut Connection,
+        username: &str,
+        verifier: impl FnOnce(&str, &str) -> io::Result<VerifiedProfile>,
+    ) -> io::Result<VerifiedProfile> {
         let mut challenge = [0u8; 4];
         OsRng.fill_bytes(&mut challenge);
         let public_len = u16::try_from(self.der.len()).map_err(|_| invalid("RSA key too long"))?;
@@ -229,9 +238,13 @@ impl ServerIdentity {
         socket.encrypted(&key);
         // The client switches to AES-CFB8 immediately after sending its reply.
         let server_hash = signed_server_hash(&key, &self.der);
-        verify_has_joined(username, &server_hash)
+        verifier(username, &server_hash)
     }
 }
+
+#[cfg(test)]
+#[path = "online_auth/injected_verifier_tests.rs"]
+mod injected_verifier_tests;
 
 /// Verify the decrypted 1.7.10 four-byte challenge for THIS connection.
 /// Compare all four positions even after a mismatch; reject both shortened
