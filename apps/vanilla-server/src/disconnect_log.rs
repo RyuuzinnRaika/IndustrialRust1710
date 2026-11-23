@@ -59,7 +59,9 @@ enum LogPolicy {
 fn policy(category: &str) -> LogPolicy {
     match category {
         "peer_closed" => LogPolicy::Silent,
-        "invalid_packet_or_state" | "truncated_frame_eof" => LogPolicy::Budgeted,
+        "invalid_packet_or_state" | "truncated_frame_eof" | "keepalive_timeout_buffer" => {
+            LogPolicy::Budgeted
+        }
         _ => LogPolicy::Always,
     }
 }
@@ -70,6 +72,16 @@ fn decide(policy: LogPolicy, budget: &mut InvalidPacketLogBudget, now: Instant) 
         LogPolicy::Always => true,
         LogPolicy::Budgeted => budget.permits(now),
     }
+}
+
+fn permit_with_budget(
+    budget: &Mutex<InvalidPacketLogBudget>,
+    now: impl FnOnce() -> Instant,
+) -> bool {
+    budget
+        .lock()
+        .map(|mut guard| decide(LogPolicy::Budgeted, &mut guard, now()))
+        .unwrap_or(false)
 }
 
 /// A diagnostic write failure must not replace the normal receive-EOF result;
@@ -88,8 +100,24 @@ pub(crate) fn log_truncated_frame<W: Write>(writer: &mut W, entity_id: i32) {
     let _ = result;
 }
 
-/// InvalidData / InvalidInput and incomplete-frame EOF diagnostics share a
-/// global per-minute budget.
+/// Emit only a fixed userspace framing category; never include packet data.
+/// Write errors do not replace the timeout or skip the normal cleanup path.
+pub(crate) fn log_keepalive_timeout_buffer<W: Write>(
+    writer: &mut W,
+    state: legacy_protocol::BufferedFrameState,
+) {
+    let label = match state {
+        legacy_protocol::BufferedFrameState::Empty => "empty",
+        legacy_protocol::BufferedFrameState::Incomplete => "incomplete",
+        legacy_protocol::BufferedFrameState::Complete => "complete",
+        legacy_protocol::BufferedFrameState::Invalid => "invalid",
+        _ => "unknown",
+    };
+    let _ = writeln!(writer, "keepalive_timeout_buffer phase=play state={label}");
+}
+
+/// InvalidData / InvalidInput, incomplete-frame EOF, and keepalive buffer
+/// diagnostics share a global per-minute budget.
 /// Other non-peer-close failures remain visible for operational diagnostics.
 /// A poisoned lock fails closed for budgeted diagnostics.
 pub(crate) fn should_log(category: &str) -> bool {
@@ -101,10 +129,7 @@ pub(crate) fn should_log(category: &str) -> bool {
     }
     static BUDGET: OnceLock<Mutex<InvalidPacketLogBudget>> = OnceLock::new();
     let budget = BUDGET.get_or_init(|| Mutex::new(InvalidPacketLogBudget::default()));
-    budget
-        .lock()
-        .map(|mut guard| decide(policy, &mut guard, Instant::now()))
-        .unwrap_or(false)
+    permit_with_budget(budget, Instant::now)
 }
 
 #[cfg(test)]
@@ -153,6 +178,54 @@ mod tests {
     }
 
     #[test]
+    fn timeout_buffer_logs_only_fixed_labels_and_ignores_write_errors() {
+        use legacy_protocol::BufferedFrameState as State;
+        for (state, expected) in [
+            (State::Empty, "empty"),
+            (State::Incomplete, "incomplete"),
+            (State::Complete, "complete"),
+            (State::Invalid, "invalid"),
+        ] {
+            let mut output = Vec::new();
+            log_keepalive_timeout_buffer(&mut output, state);
+            assert_eq!(
+                output,
+                format!("keepalive_timeout_buffer phase=play state={expected}\n").as_bytes()
+            );
+            for partial_first in [false, true] {
+                let mut writer = BrokenWriter {
+                    calls: 0,
+                    partial_first,
+                };
+                log_keepalive_timeout_buffer(&mut writer, state);
+                assert!(writer.calls > if partial_first { 1 } else { 0 });
+            }
+        }
+    }
+
+    #[test]
+    fn poisoned_budget_fails_closed_for_timeout_diagnostics() {
+        let budget = Mutex::new(InvalidPacketLogBudget::default());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = budget.lock().unwrap();
+            panic!("synthetic poisoned budget");
+        });
+        assert!(!permit_with_budget(&budget, Instant::now));
+    }
+
+    #[test]
+    fn budget_clock_is_sampled_after_lock_acquisition() {
+        let budget = Mutex::new(InvalidPacketLogBudget::default());
+        assert!(permit_with_budget(&budget, || {
+            assert!(matches!(
+                budget.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            Instant::now()
+        }));
+    }
+
+    #[test]
     fn invalid_packet_error_output_has_a_fixed_per_minute_budget() {
         let start = Instant::now();
         let mut budget = InvalidPacketLogBudget::default();
@@ -183,10 +256,10 @@ mod tests {
         assert!(!decide(policy("peer_closed"), &mut budget, start));
         assert!(decide(policy("io_timeout"), &mut budget, start));
         for index in 0..MAX_INVALID_PACKET_LOGS {
-            let category = if index % 2 == 0 {
-                "invalid_packet_or_state"
-            } else {
-                "truncated_frame_eof"
+            let category = match index % 3 {
+                0 => "invalid_packet_or_state",
+                1 => "truncated_frame_eof",
+                _ => "keepalive_timeout_buffer",
             };
             assert!(decide(policy(category), &mut budget, start));
         }
@@ -196,6 +269,11 @@ mod tests {
             start
         ));
         assert!(!decide(policy("truncated_frame_eof"), &mut budget, start));
+        assert!(!decide(
+            policy("keepalive_timeout_buffer"),
+            &mut budget,
+            start
+        ));
         assert!(decide(policy("server_io_or_state"), &mut budget, start));
         assert!(!decide(policy("peer_closed"), &mut budget, start));
         assert!(decide(

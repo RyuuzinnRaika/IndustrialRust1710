@@ -3389,6 +3389,12 @@ fn play(
             }
         }
         if keepalive_challenge_expired(pending_ping, ping_time, Instant::now()) {
+            if trace_keepalive && disconnect_log::should_log("keepalive_timeout_buffer") {
+                disconnect_log::log_keepalive_timeout_buffer(
+                    &mut io::stderr().lock(),
+                    packet_reader.buffered_frame_state(),
+                );
+            }
             if trace_keepalive {
                 eprintln!(
                     "keepalive trace: timeout pending={pending_ping:?} since_last_pong={}ms since_last_ping={}ms",
