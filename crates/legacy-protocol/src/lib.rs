@@ -66,6 +66,25 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
     Ok(b)
 }
 
+/// State of the first frame in a reader's userspace buffer. This validates
+/// only the length prefix, not packet contents. It does not describe the
+/// socket, frame contents, packet type, or arrival time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BufferedFrameState {
+    Empty,
+    Incomplete,
+    Complete,
+    Invalid,
+}
+
+enum FrameInspection {
+    Empty,
+    Incomplete,
+    Complete { header: usize, length: usize },
+    Invalid(&'static str),
+}
+
 /// Resumable Minecraft VarInt frame reader for socket connections with
 /// short timeouts. Unlike read_exact, timed-out *partial* reads retain bytes
 /// for the next poll rather than silently discarding the packet prefix.
@@ -80,12 +99,15 @@ impl BufferedFrameReader {
     pub fn new() -> Self {
         Self::default()
     }
-    fn take_complete(&mut self) -> io::Result<Option<Vec<u8>>> {
+    fn inspect_first_frame(&self) -> FrameInspection {
+        if self.received.is_empty() {
+            return FrameInspection::Empty;
+        }
         let mut length = 0u32;
         let mut prefix = None;
         for (i, &byte) in self.received.iter().take(5).enumerate() {
             if i == 4 && byte > 15 {
-                return Err(invalid("invalid fifth VarInt byte"));
+                return FrameInspection::Invalid("invalid fifth VarInt byte");
             }
             length |= ((byte & 127) as u32) << (7 * i);
             if byte & 128 == 0 {
@@ -95,17 +117,41 @@ impl BufferedFrameReader {
         }
         let Some(header) = prefix else {
             if self.received.len() >= 5 {
-                return Err(invalid("VarInt too long"));
+                return FrameInspection::Invalid("VarInt too long");
             }
-            return Ok(None);
+            return FrameInspection::Incomplete;
         };
         let count = length as usize;
         if count == 0 || count > MAX_FRAME_BYTES {
-            return Err(invalid("invalid frame size"));
+            return FrameInspection::Invalid("invalid frame size");
         }
         if self.received.len() < header + count {
-            return Ok(None);
+            return FrameInspection::Incomplete;
         }
+        FrameInspection::Complete {
+            header,
+            length: count,
+        }
+    }
+
+    /// Inspect only the first buffered frame without I/O, allocation, mutation,
+    /// or parsing packet contents. At most five length-prefix bytes are read.
+    /// Additional frames and bytes waiting in the socket are not inspected.
+    pub fn buffered_frame_state(&self) -> BufferedFrameState {
+        match self.inspect_first_frame() {
+            FrameInspection::Empty => BufferedFrameState::Empty,
+            FrameInspection::Incomplete => BufferedFrameState::Incomplete,
+            FrameInspection::Complete { .. } => BufferedFrameState::Complete,
+            FrameInspection::Invalid(_) => BufferedFrameState::Invalid,
+        }
+    }
+
+    fn take_complete(&mut self) -> io::Result<Option<Vec<u8>>> {
+        let (header, count) = match self.inspect_first_frame() {
+            FrameInspection::Empty | FrameInspection::Incomplete => return Ok(None),
+            FrameInspection::Complete { header, length } => (header, length),
+            FrameInspection::Invalid(reason) => return Err(invalid(reason)),
+        };
         let body = self.received[header..header + count].to_vec();
         self.received.drain(..header + count);
         Ok(Some(body))
