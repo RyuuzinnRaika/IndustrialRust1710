@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
 mod ecology;
+#[cfg(test)]
+mod issue1127_cocoa_regression;
 mod lighting;
 mod special;
 #[cfg(test)]
@@ -1392,8 +1394,8 @@ impl World {
         };
         let stack = crate::inventory::Stack {
             id: item_id,
-            count: if id == 127 {
-                (1 + ((old & 12) >> 2)) as u8
+            count: if id == 127 && (old & 12) >> 2 >= 2 {
+                3
             } else {
                 1
             },
