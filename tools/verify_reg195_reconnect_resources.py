@@ -138,39 +138,71 @@ def save_report(output: Path, report: dict) -> None:
         json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
 
-def finish_report(output: Path, report: dict, client, child, primary_error) -> None:
-    """Attempt each cleanup and final report without masking an earlier error."""
+def print_stderr(message: str) -> None:
+    """Preserve the intended exit status if the diagnostic stream is broken."""
+    try:
+        print(message, file=sys.stderr)
+    except Exception:
+        pass
+
+
+def finish_report(output: Path, report: dict, client, child, primary_error, log=None) -> None:
+    """Finish independent cleanup, then report; defer interrupts until then."""
     cleanup_errors = []
+    interruption = None
+
+    def failed(label, error):
+        nonlocal interruption
+        cleanup_errors.append(f"{label}: {error}")
+        if not isinstance(error, Exception) and interruption is None:
+            interruption = error
+
+    def report_stderr(message):
+        try:
+            print(message, file=sys.stderr)
+        except BaseException as error:
+            failed("stderr.write", error)
+
     if client is not None:
         try:
             client.close()
-        except Exception as error:
-            cleanup_errors.append(f"client.close: {error}")
+        except BaseException as error:
+            failed("client.close", error)
     if child is not None:
         try:
             if child.poll() is None:
                 child.kill()
-        except Exception as error:
-            cleanup_errors.append(f"child.poll/kill: {error}")
+        except BaseException as error:
+            failed("child.poll/kill", error)
         try:
             child.wait(timeout=10)
-        except Exception as error:
-            cleanup_errors.append(f"child.wait: {error}")
+        except BaseException as error:
+            failed("child.wait", error)
+    if log is not None:
+        try:
+            log.close()
+        except BaseException as error:
+            failed("server.log.close", error)
     report["cleanup_errors"] = cleanup_errors
     if cleanup_errors:
         report["lifecycle_verified"] = False
         report["verified"] = False
-        # Log before writing the manifest: the write itself can also fail.
-        print("REG-195 cleanup failed: " + "; ".join(cleanup_errors), file=sys.stderr)
+        report_stderr("REG-195 cleanup failed: " + "; ".join(cleanup_errors))
     report["finished_utc"] = datetime.now(timezone.utc).isoformat()
+    report_error = None
     try:
         save_report(output, report)
-    except Exception as report_error:
-        # Retain the primary failure if there is one; a failed final
-        # manifest write must nevertheless be visible to the operator.
-        print(f"REG-195 final manifest write failed: {report_error}", file=sys.stderr)
-        if primary_error is None:
-            raise
+    except BaseException as error:
+        report_error = error
+        if not isinstance(error, Exception) and interruption is None:
+            interruption = error
+        report_stderr(f"REG-195 final manifest write failed: {error}")
+    # Control-flow interruptions are deferred, never silently discarded.
+    # If work already failed, keep that exception as the interruption's cause.
+    if interruption is not None:
+        raise interruption from primary_error
+    if report_error is not None and primary_error is None:
+        raise report_error
     if cleanup_errors and primary_error is None:
         raise RuntimeError("cleanup failed: " + "; ".join(cleanup_errors))
 
@@ -206,75 +238,75 @@ def run(server: Path, output: Path, sessions: int, interval: float,
     }
     child = None
     client = None
-    with log_path.open("wb") as log:
-        primary_error = None
-        try:
-            child = subprocess.Popen(command, cwd=output, stdin=subprocess.PIPE,
-                                     stdout=log, stderr=subprocess.STDOUT)
-            wait_until_listening(child, port)
-            start = time.monotonic()
-            report["samples"].append({"completed": 0, **proc_snapshot(child.pid)})
-            for i in range(sessions):
-                if child.poll() is not None:
-                    raise RuntimeError(f"native server crashed: {child.returncode}")
-                # The launch rate is deliberately limited, so the test
-                # measures session retention, not the login flood limiter.
-                client = full_login(port, "Load0")
-                if query_online_count(child, log_path) != 1:
-                    raise RuntimeError(f"iteration {i}: expected exactly one online player")
-                client.close()
-                client = None
-                await_no_players(child, log_path)
-                report["completed_sessions"] = i + 1
-                if (i + 1) % 25 == 0 or i + 1 == sessions:
-                    report["samples"].append({
-                        "completed": i + 1, "elapsed_seconds": time.monotonic() - start,
-                        **proc_snapshot(child.pid),
-                    })
-                    save_report(output, report)
-                time.sleep(max(0, start + (i + 1) * interval - time.monotonic()))
-            # A distinct player after all repeats tests actual admission
-            # recovery rather than just successful TCP listener connect.
-            client = full_login(port, "Load1")
+    log = log_path.open("wb")
+    primary_error = None
+    try:
+        child = subprocess.Popen(command, cwd=output, stdin=subprocess.PIPE,
+                                 stdout=log, stderr=subprocess.STDOUT)
+        wait_until_listening(child, port)
+        start = time.monotonic()
+        report["samples"].append({"completed": 0, **proc_snapshot(child.pid)})
+        for i in range(sessions):
+            if child.poll() is not None:
+                raise RuntimeError(f"native server crashed: {child.returncode}")
+            # The launch rate is deliberately limited, so the test
+            # measures session retention, not the login flood limiter.
+            client = full_login(port, "Load0")
             if query_online_count(child, log_path) != 1:
-                raise RuntimeError("fresh player was not registered after stress")
+                raise RuntimeError(f"iteration {i}: expected exactly one online player")
             client.close()
             client = None
             await_no_players(child, log_path)
-            report["final_fresh_login"] = True
-            report["elapsed_seconds"] = time.monotonic() - start
-            report["rss"] = trend(report["samples"], "rss_bytes")
-            report["fd"] = trend(report["samples"], "fd_count")
-            report["threads"] = trend(report["samples"], "threads")
-            if max_rss_growth_mib is not None:
-                growth = report["rss"]["delta"]
-                if growth is None:
-                    report["rss_limit_status"] = "UNAVAILABLE"
-                    raise ResourceMeasurementUnavailable(
-                        "RSS measurement unavailable; threshold cannot be checked")
-                if growth > max_rss_growth_mib * 1024 * 1024:
-                    report["rss_limit_status"] = "FAIL"
-                    raise RuntimeError(f"RSS growth exceeded configured threshold: {growth}")
-                report["rss_limit_status"] = "PASS"
-            shutdown(child)
-            child = None
-            if world.with_suffix(".pending-txn.json").exists():
-                raise RuntimeError("pending transaction after orderly shutdown")
-            verify = subprocess.run([str(server), "--verify-world", str(output)],
-                                    cwd=output, capture_output=True, text=True, timeout=60)
-            if verify.returncode:
-                raise RuntimeError(f"read-only world verification failed: {verify.stderr[-1000:]}")
-            report["lifecycle_verified"] = True
-            report["metrics_complete"] = resource_samples_complete(report["samples"], sessions)
-            # /list measures online sessions, not objects retained after removal.
-            # Resource samples alone do not prove non-growing retained sessions.
-            # Keep acceptance_status NOT_RUN and verified false until measured.
-        except BaseException as error:
-            # Track this run's failure, not an unrelated caller's active except.
-            primary_error = error
-            raise
-        finally:
-            finish_report(output, report, client, child, primary_error)
+            report["completed_sessions"] = i + 1
+            if (i + 1) % 25 == 0 or i + 1 == sessions:
+                report["samples"].append({
+                    "completed": i + 1, "elapsed_seconds": time.monotonic() - start,
+                    **proc_snapshot(child.pid),
+                })
+                save_report(output, report)
+            time.sleep(max(0, start + (i + 1) * interval - time.monotonic()))
+        # A distinct player after all repeats tests actual admission
+        # recovery rather than just successful TCP listener connect.
+        client = full_login(port, "Load1")
+        if query_online_count(child, log_path) != 1:
+            raise RuntimeError("fresh player was not registered after stress")
+        client.close()
+        client = None
+        await_no_players(child, log_path)
+        report["final_fresh_login"] = True
+        report["elapsed_seconds"] = time.monotonic() - start
+        report["rss"] = trend(report["samples"], "rss_bytes")
+        report["fd"] = trend(report["samples"], "fd_count")
+        report["threads"] = trend(report["samples"], "threads")
+        if max_rss_growth_mib is not None:
+            growth = report["rss"]["delta"]
+            if growth is None:
+                report["rss_limit_status"] = "UNAVAILABLE"
+                raise ResourceMeasurementUnavailable(
+                    "RSS measurement unavailable; threshold cannot be checked")
+            if growth > max_rss_growth_mib * 1024 * 1024:
+                report["rss_limit_status"] = "FAIL"
+                raise RuntimeError(f"RSS growth exceeded configured threshold: {growth}")
+            report["rss_limit_status"] = "PASS"
+        shutdown(child)
+        child = None
+        if world.with_suffix(".pending-txn.json").exists():
+            raise RuntimeError("pending transaction after orderly shutdown")
+        verify = subprocess.run([str(server), "--verify-world", str(output)],
+                                cwd=output, capture_output=True, text=True, timeout=60)
+        if verify.returncode:
+            raise RuntimeError(f"read-only world verification failed: {verify.stderr[-1000:]}")
+        report["lifecycle_verified"] = True
+        report["metrics_complete"] = resource_samples_complete(report["samples"], sessions)
+        # /list measures online sessions, not objects retained after removal.
+        # Resource samples alone do not prove non-growing retained sessions.
+        # Keep acceptance_status NOT_RUN and verified false until measured.
+    except BaseException as error:
+        # Track this run's failure, not an unrelated caller's active except.
+        primary_error = error
+        raise
+    finally:
+        finish_report(output, report, client, child, primary_error, log)
     return report
 
 
@@ -306,16 +338,16 @@ def main() -> int:
                   "1000-session acceptance NOT_RUN")
             return 0
         if not report["metrics_complete"]:
-            print("INCOMPLETE: lifecycle completed but required resource measurements are missing", file=sys.stderr)
+            print_stderr("INCOMPLETE: lifecycle completed but required resource measurements are missing")
             return 2
         print(f"MEASURED: {report['completed_sessions']} full logins + recovery probe; "
               "acceptance NOT_RUN (retained sessions not measured; no leak verdict)")
         return 0 if args.measure_only else 2
     except ResourceMeasurementUnavailable as exc:
-        print(f"REG-195 INCOMPLETE: {exc}", file=sys.stderr)
+        print_stderr(f"REG-195 INCOMPLETE: {exc}")
         return 2
     except (OSError, RuntimeError, ValueError, TimeoutError, subprocess.TimeoutExpired) as exc:
-        print(f"REG-195 FAIL/INCOMPLETE: {exc}", file=sys.stderr)
+        print_stderr(f"REG-195 FAIL/INCOMPLETE: {exc}")
         return 1
 
 

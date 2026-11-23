@@ -284,6 +284,141 @@ class TestReconnectResourcesVerifier(TestCase):
         self.assertFalse(report["lifecycle_verified"])
         self.assertFalse(report["verified"])
 
+    def test_broken_stderr_does_not_mask_primary_or_skip_manifest(self):
+        class BrokenStderr(io.StringIO):
+            def write(self, text):
+                raise BrokenPipeError("synthetic stderr failure")
+
+        measured = {"rss_bytes": 100, "rss_peak_bytes": 120, "threads": 4, "fd_count": 3}
+        with patch.object(audit.sys, "stderr", BrokenStderr()):
+            report = self.run_fake_lifecycle(
+                1, [measured], login_failure=True, kill_failure=True,
+                expected_error=(RuntimeError, "synthetic primary login failure"))
+        self.assertFalse(report["lifecycle_verified"])
+        self.assertIn("synthetic cleanup failure", report["cleanup_errors"][0])
+
+    def test_log_close_failure_is_reported_before_final_manifest(self):
+        original_open = Path.open
+
+        class FailingClose:
+            def __init__(self, handle):
+                self.handle = handle
+
+            def __enter__(self):
+                return self.handle
+
+            def __exit__(self, *args):
+                self.handle.close()
+                raise OSError("synthetic log close failure")
+
+            def close(self):
+                self.handle.close()
+                raise OSError("synthetic log close failure")
+
+        def open_with_failure(path, *args, **kwargs):
+            handle = original_open(path, *args, **kwargs)
+            return FailingClose(handle) if path.name == "server.log" else handle
+
+        measured = {"rss_bytes": 100, "rss_peak_bytes": 120, "threads": 4, "fd_count": 3}
+        with patch.object(Path, "open", open_with_failure), redirect_stderr(io.StringIO()):
+            report = self.run_fake_lifecycle(
+                1, [measured, measured],
+                expected_error=(RuntimeError, "cleanup failed"))
+        self.assertFalse(report["lifecycle_verified"])
+        self.assertIn("synthetic log close failure", report["cleanup_errors"][0])
+
+    def test_log_close_failure_does_not_mask_primary(self):
+        original_open = Path.open
+
+        class FailingClose:
+            def __init__(self, handle):
+                self.handle = handle
+
+            def __enter__(self):
+                return self.handle
+
+            def __exit__(self, *args):
+                self.handle.close()
+                raise OSError("synthetic log close failure")
+
+            def close(self):
+                self.handle.close()
+                raise OSError("synthetic log close failure")
+
+        def open_with_failure(path, *args, **kwargs):
+            handle = original_open(path, *args, **kwargs)
+            return FailingClose(handle) if path.name == "server.log" else handle
+
+        measured = {"rss_bytes": 100, "rss_peak_bytes": 120, "threads": 4, "fd_count": 3}
+        with patch.object(Path, "open", open_with_failure), redirect_stderr(io.StringIO()):
+            report = self.run_fake_lifecycle(
+                1, [measured], login_failure=True,
+                expected_error=(RuntimeError, "synthetic primary login failure"))
+        self.assertFalse(report["lifecycle_verified"])
+        self.assertIn("synthetic log close failure", report["cleanup_errors"][0])
+
+    def test_interrupt_during_cleanup_is_deferred_until_wait_and_report(self):
+        class Child:
+            waited = False
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                raise KeyboardInterrupt("synthetic interrupt")
+
+            def wait(self, timeout):
+                self.waited = True
+                return 0
+
+        child = Child()
+        report = {"lifecycle_verified": True, "verified": False}
+        with TemporaryDirectory() as temporary, redirect_stderr(io.StringIO()):
+            output = Path(temporary)
+            with self.assertRaisesRegex(KeyboardInterrupt, "synthetic interrupt"):
+                audit.finish_report(output, report, None, child, None)
+            saved = json.loads((output / "manifest.json").read_text())
+        self.assertTrue(child.waited)
+        self.assertFalse(saved["lifecycle_verified"])
+        self.assertIn("synthetic interrupt", saved["cleanup_errors"][0])
+
+    def test_cleanup_interrupt_keeps_prior_failure_as_cause(self):
+        class Child:
+            def poll(self):
+                return None
+
+            def kill(self):
+                raise KeyboardInterrupt("synthetic interrupt")
+
+            def wait(self, timeout):
+                return 0
+
+        primary = RuntimeError("synthetic primary failure")
+        report = {"lifecycle_verified": False, "verified": False}
+        with TemporaryDirectory() as temporary, redirect_stderr(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                audit.finish_report(Path(temporary), report, None, Child(), primary)
+        self.assertIs(caught.exception.__cause__, primary)
+
+    def test_cli_keeps_failure_exit_when_stderr_is_broken(self):
+        class BrokenStderr(io.StringIO):
+            def write(self, text):
+                raise BrokenPipeError("synthetic stderr failure")
+
+        with TemporaryDirectory() as temporary:
+            server = Path(temporary) / "server"
+            server.write_bytes(b"not executed")
+            argv = ["verify", "--server", str(server), "--output", str(Path(temporary) / "out")]
+            for error, expected in ((audit.ResourceMeasurementUnavailable("missing"), 2),
+                                    (RuntimeError("failed"), 1)):
+                with patch.object(audit.sys, "argv", argv), patch.object(audit, "run", side_effect=error), \
+                     patch.object(audit.sys, "stderr", BrokenStderr()):
+                    self.assertEqual(audit.main(), expected)
+            report = {"completed_sessions": 1000, "full_1000_requested": True, "metrics_complete": False}
+            with patch.object(audit.sys, "argv", argv), patch.object(audit, "run", return_value=report), \
+                 patch.object(audit.sys, "stderr", BrokenStderr()):
+                self.assertEqual(audit.main(), 2)
+
     def test_cli_distinguishes_smoke_missing_metrics_and_full_measurement(self):
         with TemporaryDirectory() as temporary:
             server = Path(temporary) / "synthetic-server"
