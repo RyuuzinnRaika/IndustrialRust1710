@@ -46,13 +46,13 @@ impl<'a> LightSampler<'a> {
 }
 
 fn transparent(id: u16) -> bool {
-    matches!(id, 0 | 6 | 8..=11 | 18 | 20 | 30 | 31 | 37..=40 | 50 | 55
+    matches!(id, 0 | 6 | 8..=11 | 18 | 20 | 30 | 31 | 37..=40 | 50 | 51 | 55
         | 59 | 60 | 63 | 65 | 66 | 69 | 70 | 72 | 75..=78 | 83 | 90
         | 93 | 94 | 96 | 106 | 111 | 141 | 142 | 143 | 157)
 }
 fn emission(id: u16) -> u8 {
     match id {
-        10 | 11 | 89 => 15,
+        10 | 11 | 51 | 89 => 15,
         50 | 75 | 76 => 14,
         62 => 13,
         _ => 0,
@@ -270,5 +270,98 @@ mod regression_tests {
         let (lit, _) = world.light_arrays(0, 0);
         assert_eq!(lit[index(1, 64, 1, 0, 0)], 14);
         assert_eq!(lit[index(2, 64, 1, 0, 0)], 13);
+    }
+}
+
+#[cfg(test)]
+mod issue1044_fire_light_probe {
+    use super::*;
+
+    #[test]
+    fn torch_emits_across_chunk_boundary_as_a_control() {
+        let mut world = World::new();
+        assert_eq!(world.light_at(15, 100, 0).0, 0);
+        world.import_block(15, 100, 0, 50 << 4).unwrap();
+        assert_eq!(world.light_at(15, 100, 0).0, 14);
+        assert_eq!(world.light_at(16, 100, 0).0, 13);
+    }
+
+    #[test]
+    fn fire_emits_fifteen_across_chunk_boundary() {
+        let mut world = World::new();
+        assert_eq!(world.light_at(15, 100, 0).0, 0);
+        world.import_block(15, 100, 0, 51 << 4).unwrap();
+        assert_eq!(world.light_at(15, 100, 0).0, 15, "fire source light");
+        assert_eq!(world.light_at(16, 100, 0).0, 14, "adjacent chunk light");
+        assert_eq!(world.light_at(22, 100, 0).0, 8, "distance seven");
+        assert_eq!(world.light_at(23, 100, 0).0, 7, "distance eight");
+    }
+
+    #[test]
+    fn fire_passes_other_emitted_light() {
+        assert!(transparent(51), "fire must pass other emitted light");
+        // Use a synthetic block lookup to isolate transmission from fire's
+        // own emission, which would otherwise dominate this measurement.
+        let mut world = World::new();
+        world.import_block(14, 100, 0, 50 << 4).unwrap();
+        let (block, _) = world.light_arrays_with(1, 0, |x, y, z| {
+            if (x, y, z) == (15, 100, 0) {
+                51 << 4
+            } else {
+                world.get(x, y, z)
+            }
+        });
+        assert_eq!(block[index(16, 100, 0, 16, 0)], 12);
+    }
+
+    #[test]
+    fn fire_does_not_block_direct_skylight() {
+        let mut world = World::new();
+        assert_eq!(world.light_at(15, 99, 0).1, 15);
+        world.import_block(15, 100, 0, 51 << 4).unwrap();
+        assert_eq!(world.light_at(15, 99, 0).1, 15, "fire skylight");
+    }
+
+    #[test]
+    fn fresh_sampler_observes_fire_removed_while_raining() {
+        let (scratch, path) = super::super::isolated_chunk_regression_world("fire-light");
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let owned_scratch = scratch.canonicalize().unwrap();
+        assert_eq!(owned_scratch.parent(), Some(temp.as_path()));
+        let mut world = World::new();
+        world.update_and_save(&path, 15, 65, 0, 51 << 4).unwrap();
+        {
+            let mut sampler = world.lighting_sampler();
+            assert_eq!(sampler.light_at(15, 65, 0).0, 15);
+            assert_eq!(sampler.light_at(16, 65, 0).0, 14);
+        }
+        world.set_raining(true);
+        let mut removed = false;
+        for _ in 0..20 {
+            let changes = world.block_tick(&path, 64).unwrap();
+            if changes.contains(&(15, 65, 0)) {
+                assert_eq!(world.get(15, 65, 0), 0);
+                removed = true;
+                break;
+            }
+        }
+        assert!(
+            removed,
+            "fire did not disappear within 20 block ticks while raining"
+        );
+        let mut sampler = world.lighting_sampler();
+        assert_eq!(sampler.light_at(15, 65, 0).0, 0);
+        assert_eq!(sampler.light_at(16, 65, 0).0, 0);
+        drop(sampler);
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(15, 65, 0), 0);
+        assert_eq!(restored.light_at(16, 65, 0).0, 0);
+        assert_eq!(scratch.canonicalize().unwrap(), owned_scratch);
+        assert_eq!(
+            path.canonicalize().unwrap().parent(),
+            Some(owned_scratch.as_path())
+        );
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(scratch).unwrap();
     }
 }
