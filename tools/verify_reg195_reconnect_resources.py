@@ -4,6 +4,18 @@
 Only creates a fresh test world and binds 127.0.0.1. Not a DOS benchmark:
 the default 3.2-second cadence stays below the 24-logins/minute per-IP gate.
 Shortened --sessions runs are smoke tests, never evidence for 1,000 sessions.
+``lifecycle_verified`` covers the executed session lifecycle and recovery probe.
+``metrics_complete`` records whether all scheduled resource samples exist.
+Neither proves that disconnected sessions were released or memory leaks absent;
+``verified`` remains false until the issue's acceptance criteria can be tested.
+Schema version 2 changes ``verified`` from the version 1 lifecycle-only meaning;
+external report consumers must use the explicit lifecycle and coverage fields.
+Smoke runs retain exit 0 when their lifecycle finishes. Full runs return 2 while
+acceptance is NOT_RUN. Explicit --measure-only permits exit 0 for a full run
+with complete samples, but does not change verified or the acceptance status.
+Missing samples needed by a requested RSS limit also return 2, even for smoke;
+full runs with missing samples return 2 even with --measure-only. Failures use 1.
+Manifest writes are not atomic; interruption or write failure can leave partial data.
 """
 from __future__ import annotations
 
@@ -24,6 +36,10 @@ from e48_load_benchmark import (
 )
 
 ONLINE = re.compile(r"^Online \((\d+)\):", re.MULTILINE)
+
+
+class ResourceMeasurementUnavailable(RuntimeError):
+    """A required resource value could not be measured; not a threshold failure."""
 
 
 def proc_snapshot(pid: int) -> dict:
@@ -85,15 +101,36 @@ def full_login(port: int, name: str) -> SyntheticClient:
 
 
 def trend(samples: list[dict], key: str) -> dict:
-    values = [sample[key] for sample in samples
-              if isinstance(sample.get(key), int)]
+    def observed(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    values = [sample[key] for sample in samples if observed(sample.get(key))]
+    # Do not silently replace a missing boundary with a later/earlier sample.
+    initial = samples[0].get(key) if samples and observed(samples[0].get(key)) else None
+    final = samples[-1].get(key) if samples and observed(samples[-1].get(key)) else None
     return {
         "sample_count": len(values),
-        "initial": values[0] if values else None,
-        "final": values[-1] if values else None,
-        "delta": values[-1] - values[0] if len(values) >= 2 else None,
+        "initial": initial,
+        "final": final,
+        "delta": (final - initial if len(samples) >= 2
+                  and initial is not None and final is not None else None),
         "peak": max(values) if values else None,
     }
+
+
+def resource_samples_complete(samples: list[dict], sessions: int) -> bool:
+    """All scheduled samples, including both boundaries, need real counters."""
+    expected = [0, *range(25, sessions + 1, 25)]
+    if sessions % 25:
+        expected.append(sessions)
+    if [sample.get("completed") for sample in samples] != expected:
+        return False
+    for sample in samples:
+        for key in ("rss_bytes", "fd_count", "threads"):
+            value = sample.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                return False
+    return True
 
 
 def save_report(output: Path, report: dict) -> None:
@@ -101,8 +138,45 @@ def save_report(output: Path, report: dict) -> None:
         json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
 
+def finish_report(output: Path, report: dict, client, child, primary_error) -> None:
+    """Attempt each cleanup and final report without masking an earlier error."""
+    cleanup_errors = []
+    if client is not None:
+        try:
+            client.close()
+        except Exception as error:
+            cleanup_errors.append(f"client.close: {error}")
+    if child is not None:
+        try:
+            if child.poll() is None:
+                child.kill()
+        except Exception as error:
+            cleanup_errors.append(f"child.poll/kill: {error}")
+        try:
+            child.wait(timeout=10)
+        except Exception as error:
+            cleanup_errors.append(f"child.wait: {error}")
+    report["cleanup_errors"] = cleanup_errors
+    if cleanup_errors:
+        report["lifecycle_verified"] = False
+        report["verified"] = False
+        # Log before writing the manifest: the write itself can also fail.
+        print("REG-195 cleanup failed: " + "; ".join(cleanup_errors), file=sys.stderr)
+    report["finished_utc"] = datetime.now(timezone.utc).isoformat()
+    try:
+        save_report(output, report)
+    except Exception as report_error:
+        # Retain the primary failure if there is one; a failed final
+        # manifest write must nevertheless be visible to the operator.
+        print(f"REG-195 final manifest write failed: {report_error}", file=sys.stderr)
+        if primary_error is None:
+            raise
+    if cleanup_errors and primary_error is None:
+        raise RuntimeError("cleanup failed: " + "; ".join(cleanup_errors))
+
+
 def run(server: Path, output: Path, sessions: int, interval: float,
-        max_rss_growth_mib: float | None) -> dict:
+        max_rss_growth_mib: float | None, measure_only: bool = False) -> dict:
     new_output_directory(output)
     world = output / "reconnect.irw"
     whitelist = output / "whitelist.json"
@@ -113,18 +187,27 @@ def run(server: Path, output: Path, sessions: int, interval: float,
                "--world", str(world), "--whitelist", str(whitelist)]
     log_path = output / "server.log"
     report = {
+        "schema_version": 2,
         "issue": 831, "regression": "REG-195",
         "started_utc": datetime.now(timezone.utc).isoformat(),
         "requested_sessions": sessions, "full_1000_requested": sessions >= 1000,
+        "measurement_only_requested": measure_only,
+        "max_rss_growth_mib": max_rss_growth_mib,
         "interval_seconds": interval, "server_binary": str(server),
         "platform": platform.platform(),
         "client_type": "synthetic native Protocol 5, not Java GUI",
         "completed_sessions": 0, "final_fresh_login": False,
-        "samples": [], "verified": False,
+        "samples": [], "lifecycle_verified": False,
+        "metrics_complete": False,
+        "rss_limit_status": "NOT_REQUESTED" if max_rss_growth_mib is None else "NOT_RUN",
+        "retained_sessions_status": "NOT_MEASURED",
+        "acceptance_status": "NOT_RUN", "verified": False,
+        "cleanup_errors": [],
     }
     child = None
     client = None
     with log_path.open("wb") as log:
+        primary_error = None
         try:
             child = subprocess.Popen(command, cwd=output, stdin=subprocess.PIPE,
                                      stdout=log, stderr=subprocess.STDOUT)
@@ -166,9 +249,13 @@ def run(server: Path, output: Path, sessions: int, interval: float,
             if max_rss_growth_mib is not None:
                 growth = report["rss"]["delta"]
                 if growth is None:
-                    raise RuntimeError("RSS measurement unavailable; threshold cannot be checked")
+                    report["rss_limit_status"] = "UNAVAILABLE"
+                    raise ResourceMeasurementUnavailable(
+                        "RSS measurement unavailable; threshold cannot be checked")
                 if growth > max_rss_growth_mib * 1024 * 1024:
+                    report["rss_limit_status"] = "FAIL"
                     raise RuntimeError(f"RSS growth exceeded configured threshold: {growth}")
+                report["rss_limit_status"] = "PASS"
             shutdown(child)
             child = None
             if world.with_suffix(".pending-txn.json").exists():
@@ -177,26 +264,30 @@ def run(server: Path, output: Path, sessions: int, interval: float,
                                     cwd=output, capture_output=True, text=True, timeout=60)
             if verify.returncode:
                 raise RuntimeError(f"read-only world verification failed: {verify.stderr[-1000:]}")
-            report["verified"] = True
+            report["lifecycle_verified"] = True
+            report["metrics_complete"] = resource_samples_complete(report["samples"], sessions)
+            # /list measures online sessions, not objects retained after removal.
+            # Resource samples alone do not prove non-growing retained sessions.
+            # Keep acceptance_status NOT_RUN and verified false until measured.
+        except BaseException as error:
+            # Track this run's failure, not an unrelated caller's active except.
+            primary_error = error
+            raise
         finally:
-            if client is not None:
-                client.close()
-            if child is not None:
-                if child.poll() is None:
-                    child.kill()
-                child.wait(timeout=10)
-            report["finished_utc"] = datetime.now(timezone.utc).isoformat()
-            save_report(output, report)
+            finish_report(output, report, client, child, primary_error)
     return report
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--server", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--sessions", type=int, default=1000)
     parser.add_argument("--interval-seconds", type=float, default=3.2)
     parser.add_argument("--max-rss-growth-mib", type=float, default=None)
+    parser.add_argument("--measure-only", action="store_true",
+                        help="allow exit 0 for complete measurements; acceptance remains NOT_RUN")
     args = parser.parse_args()
     if not 1 <= args.sessions <= 10000:
         parser.error("--sessions must be 1..10000")
@@ -209,11 +300,20 @@ def main() -> int:
     try:
         server = args.server.resolve(strict=True)
         report = run(server, args.output.resolve(), args.sessions,
-                     args.interval_seconds, args.max_rss_growth_mib)
-        print(f"PASS: {report['completed_sessions']} full logins + recovery probe")
+                     args.interval_seconds, args.max_rss_growth_mib, args.measure_only)
         if not report["full_1000_requested"]:
-            print("SMOKE ONLY: 1000-session acceptance NOT_RUN")
-        return 0
+            print(f"SMOKE: {report['completed_sessions']} full logins + recovery probe; "
+                  "1000-session acceptance NOT_RUN")
+            return 0
+        if not report["metrics_complete"]:
+            print("INCOMPLETE: lifecycle completed but required resource measurements are missing", file=sys.stderr)
+            return 2
+        print(f"MEASURED: {report['completed_sessions']} full logins + recovery probe; "
+              "acceptance NOT_RUN (retained sessions not measured; no leak verdict)")
+        return 0 if args.measure_only else 2
+    except ResourceMeasurementUnavailable as exc:
+        print(f"REG-195 INCOMPLETE: {exc}", file=sys.stderr)
+        return 2
     except (OSError, RuntimeError, ValueError, TimeoutError, subprocess.TimeoutExpired) as exc:
         print(f"REG-195 FAIL/INCOMPLETE: {exc}", file=sys.stderr)
         return 1
