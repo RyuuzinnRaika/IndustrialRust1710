@@ -30,6 +30,8 @@ mod ground_items;
 mod hanging;
 mod hoppers;
 mod inventory;
+#[cfg(test)]
+mod issue519_eof_socket_tests;
 mod item_nbt;
 mod items_1710;
 #[cfg(test)]
@@ -3414,6 +3416,12 @@ fn play(
         let data = match packet_reader.poll(s) {
             Ok(Some(packet)) => packet,
             Ok(None) => continue,
+            Err(e) if legacy_protocol::is_truncated_frame_eof(&e) => {
+                if disconnect_log::should_log("truncated_frame_eof") {
+                    disconnect_log::log_truncated_frame(&mut io::stderr().lock(), entity_id);
+                }
+                return Ok(());
+            }
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => {
                 if e.kind() == ErrorKind::InvalidData {

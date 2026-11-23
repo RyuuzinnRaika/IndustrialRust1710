@@ -19,7 +19,7 @@ impl Drop for Scratch {
     }
 }
 
-fn context(root: &Path) -> ServerContext {
+pub(super) fn context(root: &Path) -> ServerContext {
     ServerContext {
         hub: Arc::new(Hub::default()),
         login_names: Arc::new(LoginIdentityRegistry::default()),
