@@ -7449,8 +7449,25 @@ fn play(
                             *inventory = staged;
                         }
                     }
-                    // Keep unused crafting ingredients saved rather than
-                    // deleting them when the player closes a crafting window.
+                    // The only nonzero window without a container is the
+                    // crafting table. Window zero is the personal 2x2 grid.
+                    if active_window == 0
+                        || (active_chest.is_none()
+                            && active_ender_chest.is_none()
+                            && active_furnace.is_none()
+                            && active_hopper.is_none()
+                            && active_device.is_none()
+                            && active_brewer.is_none()
+                            && active_anvil.is_none()
+                            && active_enchant.is_none())
+                    {
+                        let mut staged = inventory.clone();
+                        if staged.return_crafting_inputs(active_window) {
+                            staged.save(inventory_path)?;
+                            *inventory = staged;
+                            hub.set_equipment(entity_id, inventory.equipment());
+                        }
+                    }
                     active_window = 0;
                     active_chest = None;
                     active_ender_chest = None;

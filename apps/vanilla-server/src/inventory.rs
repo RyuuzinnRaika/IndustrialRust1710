@@ -796,6 +796,25 @@ impl Inventory {
             _ => crate::crafting::result(&self.workbench, 3),
         }
     }
+    /// Move unspent ingredients into player storage when a crafting GUI closes.
+    /// Unfitted items remain in the persisted grid rather than being lost.
+    /// The caller persists the candidate before replacing the live inventory.
+    pub fn return_crafting_inputs(&mut self, window: u8) -> bool {
+        let size = if window == 0 { 4 } else { 9 };
+        let mut changed = false;
+        for slot in 1..=size {
+            let Some(item) = self.lookup(window, slot) else {
+                continue;
+            };
+            let remainder = self.move_to_player(0, item);
+            if remainder != Some(item) {
+                self.assign(window, slot, remainder);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     fn spend_ingredients(&mut self, window: u8) {
         // Only after a recipe output has a durable destination.
         // In 1.7.10 crafting a cake consumes milk but leaves empty buckets
@@ -2640,6 +2659,46 @@ mod tests {
         // Remote player's storage must never be overwritten by this session.
         assert!(bob.ender_chest_click_window(1, 0, 0, 0).is_some());
         assert!(bob.cursor.is_none());
+    }
+
+    #[test]
+    fn closing_crafting_grid_keeps_only_unfitted_remainder_and_is_idempotent() {
+        for window in [0, 7] {
+            let mut inv = Inventory::default();
+            let stone = Stack {
+                id: 4,
+                count: 64,
+                damage: 0,
+                nbt: None,
+            };
+            for slot in 9..45 {
+                inv.assign(0, slot, Some(stone));
+            }
+            let plank = Stack {
+                id: 5,
+                count: 3,
+                damage: 0,
+                nbt: None,
+            };
+            inv.assign(0, 9, Some(Stack { count: 63, ..plank }));
+            inv.assign(window, 1, Some(plank));
+            let other_grid = if window == 0 { 7 } else { 0 };
+            inv.assign(other_grid, 1, Some(stone));
+
+            assert!(inv.return_crafting_inputs(window));
+            assert_eq!(inv.lookup(0, 9), Some(Stack { count: 64, ..plank }));
+            assert_eq!(inv.lookup(window, 1), Some(Stack { count: 2, ..plank }));
+            assert_eq!(inv.lookup(other_grid, 1), Some(stone));
+            let saved = inv.clone();
+            assert!(!inv.return_crafting_inputs(window));
+            assert_eq!(inv, saved);
+
+            let mut inv: Inventory = serde_json::from_slice(&inv.encoded().unwrap()).unwrap();
+            inv.assign(0, 10, None);
+            assert!(inv.return_crafting_inputs(window));
+            assert_eq!(inv.lookup(window, 1), None);
+            assert_eq!(inv.lookup(0, 10), Some(Stack { count: 2, ..plank }));
+        }
     }
 
     #[test]

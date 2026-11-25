@@ -1635,6 +1635,18 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
     assert_eq!(&table[3..5], &(-1i16).to_be_bytes()); // ingredients spent
     click(&mut client, 0, 36, 9, 0); // hold crafted table in hotbar
 
+    // Closing the personal grid must return unspent inputs without crafting them.
+    client.write_all(&creative(37, 17, 2)).unwrap();
+    until_packet(&mut client, 0x2f, |p| p.starts_with(&[0, 0, 37]));
+    click(&mut client, 0, 37, 20, 0);
+    click(&mut client, 0, 1, 21, 0);
+    client.write_all(&frame(13, &[0])).unwrap();
+    let closed = until_packet(&mut client, 0x30, |p| p.starts_with(&[0, 0, 45]));
+    assert_eq!(&closed[3..13], &[255; 10]); // result + four grid slots
+    assert!(closed[13..]
+        .windows(7)
+        .any(|s| s == [0, 17, 2, 0, 0, 255, 255]));
+
     // Place the crafting table atop the default grass and open its 3x3 GUI.
     let mut place = 0i32.to_be_bytes().to_vec();
     place.push(63);
@@ -1662,7 +1674,7 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
     until_packet(&mut client, 0x2f, |p| p.starts_with(&[255, 255, 255]));
 
     // Server-owned 3x3 recipe for a wooden pickaxe: three planks and two sticks.
-    client.write_all(&creative(36, 5, 3)).unwrap();
+    client.write_all(&creative(36, 5, 4)).unwrap();
     until_packet(&mut client, 0x2f, |p| p.starts_with(&[0, 0, 36]));
     client.write_all(&creative(37, 280, 2)).unwrap();
     until_packet(&mut client, 0x2f, |p| p.starts_with(&[0, 0, 37]));
@@ -1672,23 +1684,37 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
         action += 1;
         result
     };
-    do_click(37, 0); // planks: 3
+    do_click(37, 0); // planks: 4
     do_click(1, 1);
     do_click(2, 1);
-    do_click(3, 1);
+    do_click(3, 0); // two planks, one remains after crafting
     do_click(38, 0); // sticks: 2
     do_click(5, 1);
     let items = do_click(8, 1);
     assert_eq!(&items[3..10], &[1, 14, 1, 0, 0, 255, 255]); // wooden pickaxe ID 270
     let crafted = do_click(0, 0);
-    assert_eq!(&crafted[3..5], &(-1i16).to_be_bytes()); // recipe consumed
+    // One leftover plank previews a button; closing must not craft it.
+    assert_eq!(&crafted[3..10], &[0, 143, 1, 0, 0, 255, 255]);
     client.write_all(&frame(13, &[1])).unwrap();
+    let closed = until_packet(&mut client, 0x30, |p| p.starts_with(&[0, 0, 45]));
+    assert!(closed[13..]
+        .windows(7)
+        .any(|s| s == [0, 5, 1, 0, 0, 255, 255]));
+    client.write_all(&frame(13, &[1])).unwrap(); // duplicate close is ignored
     drop(client);
     server.wait_idle();
     let save = server.directory.join("players/rusttester.inventory.json");
     await_file(&save);
     let saved: Value = serde_json::from_slice(&fs::read(save).unwrap()).unwrap();
     assert_eq!(saved["cursor"]["id"], 270);
+    for (id, expected) in [(5, 1), (17, 2), (143, 0)] {
+        let total: u64 = saved["slots"].as_array().unwrap()[9..45]
+            .iter()
+            .filter(|item| item["id"] == id)
+            .map(|item| item["count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total, expected);
+    }
     assert!(saved["workbench"]
         .as_array()
         .unwrap()
