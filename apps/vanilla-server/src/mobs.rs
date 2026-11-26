@@ -6450,6 +6450,54 @@ mod tests {
         assert!(snapshot.body.ends_with(&[0x66, 0x41, 0x10, 0, 0, 0x7f]));
     }
 
+    /// NEXT-040 measurement helper: returns (full-sync bytes, delta bytes) for
+    /// one 1-damage state change and pins that both transports carry the
+    /// byte-identical visible state.
+    fn next040_delta_vs_full(kind: Kind) -> (usize, usize) {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition::default();
+        let spawn = mobs.insert(kind, at, false);
+        let id = mobs.next_id - 1;
+        assert_eq!(spawn.id, 0x0f);
+        let attack = mobs.player_attack(id, at, None, 20).unwrap();
+        let delta = attack
+            .events
+            .iter()
+            .find(|event| event.id == 0x1c)
+            .expect("health metadata delta after damage");
+        // A client that never saw the delta learns the same state from the
+        // authoritative full Spawn (0x0f) metadata tail.
+        let snapshot = mobs.spawn_events().next().unwrap();
+        assert!(
+            snapshot.body.ends_with(&delta.body[4..]),
+            "delta and full sync must agree on the visible state"
+        );
+        (spawn.body.len(), delta.body.len())
+    }
+
+    #[test]
+    fn next040_metadata_delta_byte_reduction_is_recorded() {
+        // Acceptance: a single visible-state change reaches observers as a
+        // metadata delta (0x1C) and the byte saving against a full 0x0F
+        // respawn resync is recorded. The delta must convey exactly the same
+        // health value as the full metadata tail (pinned in the helper).
+        let mut lines = Vec::new();
+        for (name, kind) in [("Sheep", Kind::Sheep), ("Wolf", Kind::Wolf)] {
+            let (full, delta) = next040_delta_vs_full(kind);
+            assert!(
+                delta * 2 < full,
+                "{name}: delta {delta}B should be under half of full resync {full}B"
+            );
+            lines.push(format!(
+                "NEXT-040 {name}: full_spawn={full}B delta_metadata={delta}B saved={}B",
+                full - delta
+            ));
+        }
+        // The recorded measurement (kept in the test log for the issue trail).
+        println!("{}", lines.join("\n"));
+        assert_eq!(lines.len(), 2);
+    }
+
     #[test]
     fn repeated_sessions_do_not_rewind_or_double_advance_world_ticks() {
         let world = World::new();
