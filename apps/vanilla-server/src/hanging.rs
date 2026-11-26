@@ -198,9 +198,15 @@ impl Hanging {
         match &self.kind {
             Kind::Painting { title, .. } => {
                 write_string(title, &mut body)?;
-                for &coordinate in &self.at {
-                    body.extend_from_slice(&coordinate.to_be_bytes());
-                }
+                // Vanilla sends the solid wall block as the packet anchor:
+                // EntityHanging.setDirection snaps the painting plane 9/16
+                // block out of the anchor cell along `direction`, so an
+                // air-cell anchor would render the art floating one block
+                // off the wall on every 1.7.10 client.
+                let (dx, dz) = offset(self.face);
+                body.extend_from_slice(&(self.at[0] - dx).to_be_bytes());
+                body.extend_from_slice(&self.at[1].to_be_bytes());
+                body.extend_from_slice(&(self.at[2] - dz).to_be_bytes());
                 body.extend_from_slice(&direction.to_be_bytes());
                 Ok(vec![Event { id: 0x10, body }])
             }
@@ -616,5 +622,89 @@ mod tests {
             .stage_place(&world, (0, 63, 0), 1, 389)
             .unwrap()
             .is_none());
+    }
+
+    /// NEXT-038 / #1021: Protocol 5 Spawn Painting (0x10) carries the solid
+    /// wall block the art hangs on, never the air cell in front of it. The
+    /// 1.7.10 client runs EntityHanging.setDirection on the packet anchor and
+    /// snaps the painting plane 9/16 block out of the *packet cell* along the
+    /// direction byte, so an air-cell anchor renders every painting floating
+    /// one block off the wall. The facing value itself keeps the vanilla
+    /// table: clicked north face 2 -> 2, south 3 -> 0, west 4 -> 1, east
+    /// 5 -> 3.
+    #[test]
+    fn painting_packets_anchor_the_wall_block_per_facing() {
+        let mut world = World::new();
+        for (x, z) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+            world.import_block(x, 64, z, 1 << 4).unwrap();
+        }
+        let cases = [
+            ((0, 64, -1), 2i8, 2i32),
+            ((0, 64, 1), 3, 0),
+            ((-1, 64, 0), 4, 1),
+            ((1, 64, 0), 5, 3),
+        ];
+        let mut state = Hangings::default();
+        let mut paintings = Vec::new();
+        for &(wall, face, direction) in &cases {
+            let (next, placed) = state.stage_place(&world, wall, face, 321).unwrap().unwrap();
+            state = next;
+            paintings.push((placed, wall, direction));
+        }
+        let mut previous_id = 0;
+        for (placed, wall, direction) in &paintings {
+            let events = placed.spawn().unwrap();
+            assert_eq!(events.len(), 1, "a painting is one 0x10 packet");
+            assert_eq!(events[0].id, 0x10);
+            let body = &events[0].body;
+            let mut rest = &body[..];
+            let mut id: i32 = 0;
+            let mut shift = 0;
+            loop {
+                let byte = *rest.first().unwrap();
+                rest = &rest[1..];
+                id |= ((byte & 0x7f) as i32) << shift;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+                shift += 7;
+            }
+            assert!(id >= FIRST_ENTITY_ID && id > previous_id, "ids ascend");
+            previous_id = id;
+            let id_end = body.len() - rest.len();
+            let title_len = body[id_end] as usize;
+            assert!((1..=13).contains(&title_len), "vanilla art title bound");
+            let coords = id_end + 1 + title_len;
+            assert_eq!(
+                body.len(),
+                coords + 16,
+                "three anchor ints plus one direction int"
+            );
+            let anchor = [
+                i32::from_be_bytes(body[coords..coords + 4].try_into().unwrap()),
+                i32::from_be_bytes(body[coords + 4..coords + 8].try_into().unwrap()),
+                i32::from_be_bytes(body[coords + 8..coords + 12].try_into().unwrap()),
+            ];
+            assert_eq!(
+                anchor,
+                [wall.0, wall.1, wall.2],
+                "the packet must carry the clicked wall block, not the air cell"
+            );
+            assert_eq!(
+                i32::from_be_bytes(body[coords + 12..coords + 16].try_into().unwrap()),
+                *direction,
+                "facing value for clicked face {}",
+                placed.face
+            );
+        }
+        // Join / chunk-transition replay re-emits the very same bodies.
+        let replay = state
+            .spawn_events_in(&BTreeSet::from([(0, 0), (0, -1), (-1, 0)]))
+            .unwrap();
+        let spawns: Vec<_> = replay.iter().filter(|event| event.id == 0x10).collect();
+        assert_eq!(spawns.len(), 4, "every painting replays in its chunk");
+        for ((placed, _, _), event) in paintings.iter().zip(&spawns) {
+            assert_eq!(event.body, placed.spawn().unwrap()[0].body);
+        }
     }
 }
