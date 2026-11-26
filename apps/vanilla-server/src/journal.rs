@@ -288,6 +288,23 @@ pub fn recover(journal: &Path) -> io::Result<()> {
 /// Durable bounded commit (one to eight files). An error must stop writes; recovery on
 /// restart completes the *new* state for all files (redo journal semantics).
 pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
+    commit_inner(journal, changes, false)
+}
+
+/// For a new inventory-to-ground transfer, disconnecting just the player
+/// after publishing redo is insufficient: the next player or ground tick
+/// could overwrite a journal participant with an older in-memory snapshot.
+/// Retry completion while the caller owns the participant locks. If that
+/// fails, stop without running ordinary disconnect or shutdown saves.
+pub fn commit_inventory_to_ground(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
+    commit_inner(journal, changes, true)
+}
+
+fn commit_inner(
+    journal: &Path,
+    changes: &[(&Path, Vec<u8>)],
+    retry_or_stop_after_publish: bool,
+) -> io::Result<()> {
     let _lock = SERIAL
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -348,8 +365,29 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
     crate::save_replace::rename_with_retry(&prepare, journal, |source, destination| {
         fs::rename(source, destination)
     })?;
-    sync_directory(base)?;
-    apply(journal, &record)
+    let finish = || sync_directory(base).and_then(|()| apply(journal, &record));
+    match finish() {
+        Err(first) if retry_or_stop_after_publish => {
+            let retry = match fs::symlink_metadata(journal) {
+                Ok(_) => finish(),
+                // apply only removes the log after syncing every target.
+                Err(ref error) if error.kind() == ErrorKind::NotFound => sync_directory(base),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = retry {
+                // A broken diagnostic stream must not turn the fail-stop
+                // into an unwinding session-thread panic.
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "FATAL: inventory-to-ground transaction requires startup recovery: {} ({first}; retry: {error})",
+                    journal.display()
+                );
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        result => result,
+    }
 }
 
 #[cfg(test)]

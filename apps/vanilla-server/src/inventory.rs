@@ -800,7 +800,7 @@ impl Inventory {
     /// Unfitted items remain in the persisted grid rather than being lost.
     /// The caller persists the candidate before replacing the live inventory.
     pub fn return_crafting_inputs(&mut self, window: u8) -> bool {
-        let size = if window == 0 { 4 } else { 9 };
+        let size = Self::crafting_grid_size(window);
         let mut changed = false;
         for slot in 1..=size {
             let Some(item) = self.lookup(window, slot) else {
@@ -813,6 +813,27 @@ impl Inventory {
             }
         }
         changed
+    }
+
+    fn crafting_grid_size(window: u8) -> i16 {
+        if window == 0 {
+            4
+        } else {
+            9
+        }
+    }
+
+    /// Remove only remaining ingredients from a staged close. Slot zero is
+    /// a recipe preview, not an item, and the cursor is not part of the grid.
+    pub fn take_remaining_crafting_inputs(&mut self, window: u8) -> Vec<Stack> {
+        let mut remainder = Vec::new();
+        for slot in 1..=Self::crafting_grid_size(window) {
+            if let Some(stack) = self.lookup(window, slot) {
+                self.assign(window, slot, None);
+                remainder.push(stack);
+            }
+        }
+        remainder
     }
 
     fn spend_ingredients(&mut self, window: u8) {

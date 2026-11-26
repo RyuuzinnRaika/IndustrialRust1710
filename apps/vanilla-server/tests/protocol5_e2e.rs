@@ -170,6 +170,18 @@ impl NativeServer {
             )
             .unwrap();
         }
+        let (process, port, stderr_path) = Self::launch(&directory, survival);
+        Self {
+            _exclusive_test_run: exclusive,
+            process,
+            directory,
+            stderr_path,
+            port,
+            survival,
+        }
+    }
+
+    fn launch(directory: &Path, survival: bool) -> (Child, u16, PathBuf) {
         let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
@@ -188,20 +200,12 @@ impl NativeServer {
         // Keep this file outside the world being verified and backed up.
         let stderr_path = directory.with_extension("server-stderr.log");
         let stderr_file = fs::File::create(&stderr_path).unwrap();
-        let process = command
+        let mut process = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_file))
             .spawn()
             .unwrap();
-        let mut server = Self {
-            _exclusive_test_run: exclusive,
-            process,
-            directory,
-            stderr_path,
-            port,
-            survival,
-        };
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
@@ -209,12 +213,12 @@ impl NativeServer {
             }
             assert!(Instant::now() < deadline, "native server did not start");
             assert!(
-                server.process.try_wait().unwrap().is_none(),
+                process.try_wait().unwrap().is_none(),
                 "native server exited"
             );
             thread::sleep(Duration::from_millis(50));
         }
-        server
+        (process, port, stderr_path)
     }
     #[track_caller]
     fn client(&self) -> TcpStream {
@@ -1720,6 +1724,188 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
         .unwrap()
         .iter()
         .all(Value::is_null));
+}
+
+#[derive(Clone, Copy)]
+enum CraftCloseCase {
+    Normal,
+    NoGroundCapacity,
+    BeforeRedo,
+    AfterRedo,
+}
+
+fn run_nearly_full_craft_close(workbench: bool, case: CraftCloseCase) {
+    let mut seeded = (9..45).map(|slot| (slot, 4, 64)).collect::<Vec<_>>();
+    seeded[0] = (9, 5, 63);
+    if workbench {
+        seeded[27] = (36, 58, 64);
+    } else {
+        seeded.extend([(1, 5, 3), (2, 17, 2)]);
+    }
+    let mut server = NativeServer::start_with_stacks(true, &[("RustTester", seeded)], false);
+    let inventory = server
+        .directory
+        .join("players/rusttester.survival.inventory.json");
+    let ground = server.directory.join("flat.drops.json");
+    let journal = server.directory.join("flat.pending-txn.json");
+    let read = |path: &Path| -> Value { serde_json::from_slice(&fs::read(path).unwrap()).unwrap() };
+    let mut save = read(&inventory);
+    if workbench {
+        save["workbench"][0] = json!({"id": 5, "count": 3, "damage": 0});
+        save["workbench"][1] = json!({"id": 17, "count": 2, "damage": 0});
+    }
+    save["cursor"] = json!({"id": 280, "count": 1, "damage": 0});
+    fs::write(&inventory, serde_json::to_vec(&save).unwrap()).unwrap();
+    if matches!(case, CraftCloseCase::NoGroundCapacity) {
+        // The pool is loaded at startup. Restart with the entity ID
+        // allocator exhausted, without creating thousands of live drops.
+        server.stop();
+        fs::write(
+            &ground,
+            br#"{"version":1,"next_id":2147483647,"entries":{}}"#,
+        )
+        .unwrap();
+        let (process, port, stderr_path) = NativeServer::launch(&server.directory, true);
+        (server.process, server.port, server.stderr_path) = (process, port, stderr_path);
+    }
+
+    let (mut client, _, _) = server.join("RustTester");
+    let window = u8::from(workbench);
+    if workbench {
+        let use_at = |y, item: &[u8]| {
+            let mut payload = 0i32.to_be_bytes().to_vec();
+            payload.push(y);
+            payload.extend_from_slice(&0i32.to_be_bytes());
+            payload.push(1);
+            payload.extend_from_slice(item);
+            payload.extend_from_slice(&[8, 8, 8]);
+            frame(8, &payload)
+        };
+        client
+            .write_all(&use_at(63, &[0, 58, 64, 0, 0, 255, 255]))
+            .unwrap();
+        until_packet(&mut client, 0x23, |p| {
+            p.len() >= 11 && p[4] == 64 && p[9] == 58
+        });
+        client.write_all(&use_at(64, &[255, 255])).unwrap();
+        let opened = until_packet(&mut client, 0x2d, |p| p[0] == window);
+        assert_open_window_protocol5(&opened, window, 1, "Crafting", 0);
+        until_packet(&mut client, 0x30, |p| p[0] == window);
+    }
+
+    let fault = match case {
+        CraftCloseCase::BeforeRedo => Some(journal.with_extension("journal.tmp")),
+        CraftCloseCase::AfterRedo => Some(ground.with_extension("txn.tmp")),
+        _ => None,
+    };
+    if let Some(path) = &fault {
+        fs::create_dir(path).unwrap();
+    }
+    client.write_all(&frame(13, &[window])).unwrap();
+
+    let expected_drops = matches!(case, CraftCloseCase::Normal | CraftCloseCase::AfterRedo);
+    if matches!(case, CraftCloseCase::AfterRedo) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = server.process.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server did not stop after failed redo"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(1));
+        assert!(fs::read_to_string(&server.stderr_path)
+            .unwrap()
+            .contains("inventory-to-ground transaction requires startup recovery"));
+        assert!(journal.is_file());
+        assert_eq!(read(&inventory)["slots"][9]["count"], 64);
+        fs::remove_dir(fault.unwrap()).unwrap();
+        let (process, port, stderr_path) = NativeServer::launch(&server.directory, true);
+        (server.process, server.port, server.stderr_path) = (process, port, stderr_path);
+    } else if matches!(case, CraftCloseCase::BeforeRedo) {
+        drop(client);
+        server.wait_idle();
+        assert!(server.process.try_wait().unwrap().is_none());
+        assert!(!journal.exists());
+        assert!(!ground.exists());
+        assert_eq!(read(&inventory)["slots"][9]["count"], 63);
+        assert_eq!(read(&inventory)["slots"][1]["count"], 3);
+        return;
+    } else {
+        // The inventory snapshot is sent directly, before the Hub drains.
+        until_packet(&mut client, 0x30, |p| p.starts_with(&[0, 0, 45]));
+        if expected_drops {
+            until_packet(&mut client, 0x1c, |p| p.len() == 13 && p[5..8] == [0, 5, 2]);
+            until_packet(&mut client, 0x1c, |p| {
+                p.len() == 13 && p[5..8] == [0, 17, 2]
+            });
+        }
+        client.write_all(&frame(13, &[window])).unwrap();
+        if !workbench {
+            until_packet(&mut client, 0x30, |p| p.starts_with(&[0, 0, 45]));
+        }
+        drop(client);
+        server.wait_idle();
+    }
+
+    assert!(!journal.exists());
+    let stored = read(&inventory);
+    assert_eq!(stored["slots"][9]["count"], 64);
+    assert_eq!(stored["cursor"]["id"], 280);
+    for (personal, table) in [(1, 0), (2, 1)] {
+        let slot = if workbench {
+            &stored["workbench"][table]
+        } else {
+            &stored["slots"][personal]
+        };
+        if expected_drops {
+            assert!(slot.is_null());
+        } else {
+            assert_eq!(slot["count"], 2);
+        }
+    }
+    let dropped = read(&ground);
+    let entries = dropped["entries"].as_object().unwrap();
+    if expected_drops {
+        assert_eq!(entries.len(), 2);
+        for id in [5, 17] {
+            assert_eq!(
+                entries
+                    .values()
+                    .filter(|drop| drop["stack"]["id"] == id)
+                    .map(|drop| drop["stack"]["count"].as_u64().unwrap())
+                    .sum::<u64>(),
+                2
+            );
+        }
+    } else {
+        assert!(entries.is_empty());
+    }
+}
+
+#[test]
+fn crafting_close_survival_overflow_is_committed_once_for_both_grids() {
+    for workbench in [false, true] {
+        run_nearly_full_craft_close(workbench, CraftCloseCase::Normal);
+    }
+}
+
+#[test]
+fn crafting_close_retains_overflow_if_ground_has_no_capacity() {
+    run_nearly_full_craft_close(false, CraftCloseCase::NoGroundCapacity);
+}
+
+#[test]
+fn crafting_close_preserves_ingredients_when_redo_cannot_be_published() {
+    run_nearly_full_craft_close(false, CraftCloseCase::BeforeRedo);
+}
+
+#[test]
+fn crafting_close_recovers_both_snapshots_after_a_partial_write() {
+    run_nearly_full_craft_close(false, CraftCloseCase::AfterRedo);
 }
 
 #[test]
