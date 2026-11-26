@@ -1871,6 +1871,82 @@ mod tests {
     }
 
     #[test]
+    fn next040_entity_teleport_reports_actual_negative_z() {
+        // NEXT-040: an S18 at a new position must carry the entity's actual
+        // z coordinate, not a defaulted or dropped one. Vanilla 1.7.10
+        // EntityTrackerEntry encodes each axis with floor(pos * 32.0); the
+        // z axis is stored last (bytes 12..16) and is the axis this pin
+        // focuses on. A negative fractional z also distinguishes floor from
+        // the truncation-toward-zero cast, which is off by one whole
+        // thirty-second unit for every negative coordinate.
+        let position = PlayerPosition {
+            x: 0.0,
+            y: 64.0,
+            z: -12.75,
+        };
+        let event = teleport(42, &position, 0.0, 0.0);
+        assert_eq!(event.id, 0x18);
+        let mut expected = Vec::with_capacity(18);
+        expected.extend_from_slice(&42i32.to_be_bytes());
+        expected.extend_from_slice(&0i32.to_be_bytes()); // x = 0.0 * 32
+        expected.extend_from_slice(&(64 * 32i32).to_be_bytes()); // y = 64.0 * 32
+        expected.extend_from_slice(&(-408i32).to_be_bytes()); // z = floor(-12.75 * 32)
+        expected.extend_from_slice(&[0, 0]); // yaw, pitch
+        assert_eq!(event.body, expected);
+        assert_eq!(
+            i32::from_be_bytes(event.body[12..16].try_into().unwrap()),
+            -408,
+            "z must be the actual floor(z * 32), never zero"
+        );
+    }
+
+    #[test]
+    fn next040_move_player_broadcast_carries_actual_z_to_observers() {
+        // The hub broadcast is the only entity position channel in this
+        // server (every move is an absolute S18): the observer must receive
+        // the mover's real z, so a client that reconstructs position from
+        // the packet alone lands at the true depth, not at the spawn z.
+        let hub = Hub::default();
+        let (mover_id, _mover_rx, _) = hub
+            .add(
+                "Mover".into(),
+                "uuid-mover".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        let (observer_id, observer_rx, _) = hub
+            .add(
+                "Observer".into(),
+                "uuid-observer".into(),
+                PlayerPosition {
+                    x: 0.0,
+                    y: 64.0,
+                    z: -8.0,
+                },
+            )
+            .unwrap();
+        let destination = PlayerPosition {
+            x: 3.5,
+            y: 71.0,
+            z: -12.75,
+        };
+        hub.move_player(mover_id, destination, 0.0, 0.0);
+        let mut saw_teleport = false;
+        while let Ok(event) = observer_rx.try_recv() {
+            if event.id == 0x18 && event.body[..4] == mover_id.to_be_bytes() {
+                saw_teleport = true;
+                let z = i32::from_be_bytes(event.body[12..16].try_into().unwrap());
+                assert_eq!(z, -408, "actual z in broadcast");
+                assert_ne!(z, 0, "z must not default to zero");
+            }
+        }
+        assert!(
+            saw_teleport,
+            "observer must receive the mover's S18 (observer id {observer_id})"
+        );
+    }
+
+    #[test]
     fn protocol5_player_list_and_spawn() {
         let list = list_entry("RustTester", true).unwrap();
         assert_eq!(list.id, 0x38);
