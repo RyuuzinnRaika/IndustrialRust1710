@@ -2029,6 +2029,132 @@ fn native_ender_chest_is_personal_and_survives_reopening_over_tcp() {
 }
 
 #[test]
+fn next104_furnace_fuel_removal_keeps_both_survival_views_in_sync() {
+    let server = NativeServer::start_with_stacks(
+        true,
+        &[("RustTester", vec![(36, 61, 1), (37, 15, 1), (38, 263, 2)])],
+        false,
+    );
+    let (mut actor, _, _) = server.join("RustTester");
+    let (mut observer, _, _) = server.join("TwinAlpha");
+    let use_block = |y, held: &[u8]| {
+        let mut body = 0i32.to_be_bytes().to_vec();
+        body.push(y);
+        body.extend_from_slice(&0i32.to_be_bytes());
+        body.push(1);
+        body.extend_from_slice(held);
+        body.extend_from_slice(&[8, 8, 8]);
+        frame(8, &body)
+    };
+    actor
+        .write_all(&use_block(63, &[0, 61, 1, 0, 0, 255, 255]))
+        .unwrap();
+    until_packet(&mut actor, 0x23, |p| block_change_is(p, 64, 61));
+
+    for client in [&mut actor, &mut observer] {
+        client.write_all(&use_block(64, &[255, 255])).unwrap();
+        let opened = until_packet(client, 0x2d, |p| p.first() == Some(&1));
+        assert_open_window_protocol5(&opened, 1, 2, "Furnace", 3);
+        until_packet(client, 0x30, |p| {
+            p.starts_with(&[1, 0, 39, 255, 255, 255, 255, 255, 255])
+        });
+    }
+    let shift = |client: &mut TcpStream, slot: i16, action: i16| {
+        let mut data = vec![1];
+        data.extend_from_slice(&slot.to_be_bytes());
+        data.push(0);
+        data.extend_from_slice(&action.to_be_bytes());
+        data.push(1);
+        data.extend_from_slice(&(-1i16).to_be_bytes());
+        client.write_all(&frame(0x0e, &data)).unwrap();
+        until_packet(client, 0x32, |p| {
+            p == [1, action.to_be_bytes()[0], action.to_be_bytes()[1], 1]
+        });
+    };
+    let read_cycle = |client: &mut TcpStream| {
+        [0, 1, 2].map(|property| {
+            let data = until_packet(client, 0x31, |p| {
+                p.len() == 5 && p.starts_with(&[1, 0, property])
+            });
+            u16::from_be_bytes([data[3], data[4]])
+        })
+    };
+
+    shift(&mut actor, 31, 1); // one iron ore
+    shift(&mut actor, 32, 2); // two coal: one ignites and one remains
+    let starts_burning = [
+        1, 0, 39, 0, 15, 1, 0, 0, 255, 255, 1, 7, 1, 0, 0, 255, 255, 255, 255,
+    ];
+    for client in [&mut actor, &mut observer] {
+        until_packet(client, 0x30, |p| {
+            // ID 263 = 0x0107; one coal in the fuel slot, no result yet.
+            p.starts_with(&starts_burning)
+        });
+        let [cook, remaining, capacity] = read_cycle(client);
+        assert!((1..200).contains(&cook));
+        assert!(remaining > 0);
+        assert_eq!(capacity, 1600);
+        assert_eq!(remaining + cook, 1601);
+    }
+
+    shift(&mut actor, 1, 3); // remove only the unburned coal
+    let mut timers = Vec::new();
+    for client in [&mut actor, &mut observer] {
+        until_packet(client, 0x30, |p| {
+            p.starts_with(&[1, 0, 39, 0, 15, 1, 0, 0, 255, 255, 255, 255, 255, 255])
+        });
+        let [cook, remaining, capacity] = read_cycle(client);
+        assert!((1..200).contains(&cook));
+        assert!(
+            remaining > 0,
+            "taking reserve fuel must not extinguish the furnace"
+        );
+        // Two sessions can sample different server ticks: compare their
+        // normalized timer for this uninterrupted first smelt, not wall time.
+        timers.push((remaining + cook, capacity));
+    }
+    assert_eq!(timers, [(1601, 1600); 2]);
+
+    for client in [&mut actor, &mut observer] {
+        // The 200-tick smelt emits three properties on each active tick,
+        // more than the ordinary short-response packet budget.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "viewer never received the smelted ingot"
+            );
+            let (id, body) = pump(client);
+            if id == 0x30
+                && body.starts_with(&[1, 0, 39, 255, 255, 255, 255, 1, 9, 1, 0, 0, 255, 255])
+            {
+                break;
+            }
+        }
+        let [cook, remaining, capacity] = read_cycle(client);
+        assert_eq!(cook, 0);
+        assert!((1..=1401).contains(&remaining));
+        assert_eq!(capacity, 1600);
+    }
+
+    drop(actor);
+    drop(observer);
+    server.wait_idle();
+    let players = server
+        .directory
+        .join("players/rusttester.survival.inventory.json");
+    let inventory: Value = serde_json::from_slice(&fs::read(players).unwrap()).unwrap();
+    let coal: u64 = inventory["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|slot| slot["id"] == 263)
+        .map(|slot| slot["count"].as_u64().unwrap())
+        .sum();
+    assert_eq!(coal, 1, "exactly one unburned coal was returned");
+}
+
+#[test]
 fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     let server = NativeServer::start();
     let (mut alice, _, _) = server.join("RustTester");
