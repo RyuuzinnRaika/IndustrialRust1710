@@ -286,10 +286,7 @@ fn observe_drop(stream: &mut TcpStream, slot: &[u8], count: u8, prior: Option<i3
                     }
                 }
             }
-        } else if id == 0x1c
-            && body.len() == 13
-            && body[4..] == [0xaa, 0, 3, count, 0, 0, 255, 255, 127]
-        {
+        } else if id == 0x1c && body.len() == 12 && body[4..] == [0xaa, 0, 3, count, 0, 0, 0, 127] {
             metadata.push(i32::from_be_bytes(body[..4].try_into().unwrap()));
         }
         if slot_seen {
@@ -488,12 +485,7 @@ fn run_controlled_session() {
 
     let mut action = vec![4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255];
     send_packet(&mut session.client, 7, &action);
-    let first = observe_drop(
-        &mut session.client,
-        &[0, 0, 36, 0, 3, 11, 0, 0, 255, 255],
-        1,
-        None,
-    );
+    let first = observe_drop(&mut session.client, &[0, 0, 36, 0, 3, 11, 0, 0, 0], 1, None);
     {
         let mut guard = ground.lock().unwrap();
         guard.test_make_pickups_ready();
@@ -557,7 +549,7 @@ fn run_controlled_session() {
         let mut destroyed = vec![1];
         destroyed.extend_from_slice(&second.to_be_bytes());
         let mut merged = first.to_be_bytes().to_vec();
-        merged.extend_from_slice(&[0xaa, 0, 3, 12, 0, 0, 255, 255, 127]);
+        merged.extend_from_slice(&[0xaa, 0, 3, 12, 0, 0, 0, 127]);
         assert!(events
             .iter()
             .any(|event| event.id == 0x13 && event.body == destroyed));

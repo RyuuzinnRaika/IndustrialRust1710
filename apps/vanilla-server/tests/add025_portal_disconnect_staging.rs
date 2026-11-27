@@ -215,7 +215,7 @@ fn creative_set(client: &mut Client, slot: i16, id: i16, count: u8) {
     p.extend_from_slice(&id.to_be_bytes());
     p.push(count);
     p.extend_from_slice(&0i16.to_be_bytes());
-    p.extend_from_slice(&(-1i16).to_be_bytes());
+    p.push(0); // no NBT: single TAG_End byte
     client.send(&frame(0x10, &p));
     let want = [0u8, (slot >> 8) as u8, slot as u8];
     client
@@ -241,7 +241,7 @@ fn place_at(client: &mut Client, x: i32, y: u8, z: i32, face: u8, item: Option<(
             p.extend_from_slice(&id.to_be_bytes());
             p.push(count);
             p.extend_from_slice(&0i16.to_be_bytes());
-            p.extend_from_slice(&(-1i16).to_be_bytes());
+            p.push(0); // no NBT: single TAG_End byte
         }
         None => p.extend_from_slice(&(-1i16).to_be_bytes()),
     }

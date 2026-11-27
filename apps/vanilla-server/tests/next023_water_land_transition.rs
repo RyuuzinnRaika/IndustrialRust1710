@@ -262,12 +262,12 @@ fn place_water(client: &mut BufferedClient, x: i32) {
     give.extend_from_slice(&8i16.to_be_bytes());
     give.push(1);
     give.extend_from_slice(&0i16.to_be_bytes());
-    give.extend_from_slice(&(-1i16).to_be_bytes());
+    give.push(0); // no NBT: single TAG_End byte
     client.write_all(&packet(0x10, &give)).unwrap();
     wait_for(
         client,
         0x2f,
-        |body| body.len() == 10 && body[3..5] == 8i16.to_be_bytes(),
+        |body| body.len() == 9 && body[3..5] == 8i16.to_be_bytes(),
         "water slot echo",
     );
     let mut place = x.to_be_bytes().to_vec();
@@ -277,7 +277,7 @@ fn place_water(client: &mut BufferedClient, x: i32) {
     place.extend_from_slice(&8i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&packet(8, &place)).unwrap();
     wait_for(

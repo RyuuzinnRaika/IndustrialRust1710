@@ -310,13 +310,22 @@ impl NativeServer {
                 chunks += 1;
             } else if pid == 0x30 {
                 assert_eq!(&payload[..3], &[0, 0, 45]);
-                // Empty stacks take 2 bytes; populated stacks take 7 bytes.
-                // After reconnect the saved Creative hotbar must be restored.
+                // Empty stacks take 2 bytes; populated stacks take
+                // id/count/damage plus a self-delimiting NBT envelope.
+                // This harness never tags items, so TAG_End (0x00) ends
+                // every populated slot. After reconnect the saved Creative
+                // hotbar must be restored.
                 let mut offset = 3usize;
                 for _ in 0..45 {
                     assert!(offset + 2 <= payload.len());
                     let item = i16::from_be_bytes(payload[offset..offset + 2].try_into().unwrap());
-                    offset += if item == -1 { 2 } else { 7 };
+                    offset += 2;
+                    if item != -1 {
+                        offset += 3; // count + damage
+                        assert!(offset < payload.len());
+                        assert_eq!(payload[offset], 0, "harness items carry no NBT");
+                        offset += 1;
+                    }
                 }
                 assert_eq!(offset, payload.len());
                 inventory_seen = true;
@@ -591,7 +600,7 @@ fn f54_stop_drains_two_live_protocol5_players_and_persists_their_state() {
     creative_stack.extend_from_slice(&1i16.to_be_bytes()); // stone
     creative_stack.push(4); // count
     creative_stack.extend_from_slice(&0i16.to_be_bytes()); // metadata
-    creative_stack.extend_from_slice(&(-1i16).to_be_bytes()); // no NBT
+    creative_stack.push(0); // no NBT: single TAG_End byte // no NBT
     first.write_all(&frame(16, &creative_stack)).unwrap();
     until_packet(&mut first, 0x2f, |body| body.starts_with(&[0, 0, 36]));
     send_position(&mut first, 1.5, 65.0, 0.5);
@@ -677,7 +686,7 @@ fn console_gamemode_changes_live_protocol5_and_keeps_inventories_isolated() {
     creative_stack.extend_from_slice(&1i16.to_be_bytes());
     creative_stack.push(10);
     creative_stack.extend_from_slice(&0i16.to_be_bytes());
-    creative_stack.extend_from_slice(&(-1i16).to_be_bytes());
+    creative_stack.push(0); // no NBT: single TAG_End byte
     client.write_all(&frame(16, &creative_stack)).unwrap();
     until_packet(&mut client, 0x2f, |body| body.starts_with(&[0, 0, 36]));
 
@@ -1161,7 +1170,7 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     place.extend_from_slice(&4i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x2f, |b| b == [0, 0, 36, 255, 255]);
@@ -1173,11 +1182,9 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     });
     // Protocol5 C10 Creative Inventory Action: window 0, slot 36, item 4 x64.
     let mut creative = 36i16.to_be_bytes().to_vec();
-    creative.extend_from_slice(&[0, 4, 64, 0, 0, 255, 255]);
+    creative.extend_from_slice(&[0, 4, 64, 0, 0, 0]);
     client.write_all(&frame(0x10, &creative)).unwrap();
-    until_packet(&mut client, 0x2f, |b| {
-        b == [0, 0, 36, 0, 4, 64, 0, 0, 255, 255]
-    });
+    until_packet(&mut client, 0x2f, |b| b == [0, 0, 36, 0, 4, 64, 0, 0, 0]);
     // Now the same client-held value is backed by the server's selected slot.
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |b| {
@@ -1417,7 +1424,7 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
 
     // No prior inventory and empty hotbar: Creative action must not mint items.
     let mut creative = 36i16.to_be_bytes().to_vec();
-    creative.extend_from_slice(&[0, 4, 64, 0, 0, 255, 255]);
+    creative.extend_from_slice(&[0, 4, 64, 0, 0, 0]);
     client.write_all(&frame(0x10, &creative)).unwrap();
     until_packet(&mut client, 0x30, |data| data.len() == 93);
 
@@ -1450,9 +1457,9 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     let drop_id = read_varint(&mut entity_bytes).unwrap() as i32;
     assert!(drop_id > 1_000_000_000);
     let metadata = until_packet(&mut client, 0x1c, |b| {
-        b.len() >= 13 && b[..4] == drop_id.to_be_bytes()
+        b.len() >= 12 && b[..4] == drop_id.to_be_bytes()
     });
-    assert_eq!(&metadata[4..], &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
+    assert_eq!(&metadata[4..], &[0xaa, 0, 3, 1, 0, 0, 0, 127]);
     until_packet(&mut client, 0x23, |b| {
         b.len() >= 11 && b[4] == 63 && b[9] == 0
     });
@@ -1467,9 +1474,7 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
 
     thread::sleep(Duration::from_millis(900));
     send_position(&mut client, 0.5, 65.0, 0.5);
-    until_packet(&mut client, 0x2f, |b| {
-        b == [0, 0, 36, 0, 3, 1, 0, 0, 255, 255]
-    });
+    until_packet(&mut client, 0x2f, |b| b == [0, 0, 36, 0, 3, 1, 0, 0, 0]);
     until_packet(&mut client, 0x0d, |b| {
         b.len() == 8 && b[..4] == drop_id.to_be_bytes()
     });
@@ -1489,7 +1494,7 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     placed.extend_from_slice(&3i16.to_be_bytes());
     placed.push(64);
     placed.extend_from_slice(&0i16.to_be_bytes());
-    placed.extend_from_slice(&(-1i16).to_be_bytes());
+    placed.push(0); // no NBT: single TAG_End byte
     placed.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &placed)).unwrap();
     // Successful placement sends the full server-owned inventory (S30),
@@ -1534,11 +1539,9 @@ fn native_click_window_is_authoritative_and_persists_carried_stack() {
 
     // Create one Creative stack through the existing authoritative action.
     let mut creative = 36i16.to_be_bytes().to_vec();
-    creative.extend_from_slice(&[0, 3, 5, 0, 0, 255, 255]);
+    creative.extend_from_slice(&[0, 3, 5, 0, 0, 0]);
     client.write_all(&frame(0x10, &creative)).unwrap();
-    until_packet(&mut client, 0x2f, |p| {
-        p == [0, 0, 36, 0, 3, 5, 0, 0, 255, 255]
-    });
+    until_packet(&mut client, 0x2f, |p| p == [0, 0, 36, 0, 3, 5, 0, 0, 0]);
 
     let click = |slot: i16, action: i16, button: i8, mode: i8, claimed: &[u8]| {
         let mut body = vec![0]; // window 0
@@ -1558,16 +1561,16 @@ fn native_click_window_is_authoritative_and_persists_carried_stack() {
     let items = until_packet(&mut client, 0x30, |_| true);
     assert_eq!(&items[3 + 36 * 2..3 + 36 * 2 + 2], &(-1i16).to_be_bytes());
     until_packet(&mut client, 0x2f, |p| {
-        p == [255, 255, 255, 0, 3, 5, 0, 0, 255, 255]
+        p == [255, 255, 255, 0, 3, 5, 0, 0, 0]
     });
 
     // Unsupported drag must fail even when the client claims a valuable item.
-    let forged = [0, 57, 64, 0, 0, 255, 255];
+    let forged = [0, 57, 64, 0, 0, 0];
     client.write_all(&click(10, 8, 0, 5, &forged)).unwrap();
     until_packet(&mut client, 0x32, |p| p == [0, 0, 8, 0]);
     until_packet(&mut client, 0x30, |_| true);
     until_packet(&mut client, 0x2f, |p| {
-        p == [255, 255, 255, 0, 3, 5, 0, 0, 255, 255]
+        p == [255, 255, 255, 0, 3, 5, 0, 0, 0]
     });
     // Clientbound rejection acknowledgement (serverbound 0x0F).
     client.write_all(&frame(0x0f, &[0, 0, 8, 0])).unwrap();
@@ -1578,12 +1581,9 @@ fn native_click_window_is_authoritative_and_persists_carried_stack() {
         .unwrap();
     until_packet(&mut client, 0x32, |p| p == [0, 0, 9, 1]);
     let items = until_packet(&mut client, 0x30, |_| true);
-    assert_eq!(
-        &items[3 + 10 * 2..3 + 10 * 2 + 7],
-        &[0, 3, 1, 0, 0, 255, 255]
-    );
+    assert_eq!(&items[3 + 10 * 2..3 + 10 * 2 + 6], &[0, 3, 1, 0, 0, 0]);
     until_packet(&mut client, 0x2f, |p| {
-        p == [255, 255, 255, 0, 3, 4, 0, 0, 255, 255]
+        p == [255, 255, 255, 0, 3, 4, 0, 0, 0]
     });
     drop(client);
     server.wait_idle();
@@ -1604,7 +1604,7 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
         payload.extend_from_slice(&id.to_be_bytes());
         payload.push(amount);
         payload.extend_from_slice(&0i16.to_be_bytes());
-        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.push(0); // no NBT: single TAG_End byte
         frame(0x10, &payload)
     };
     let click = |client: &mut TcpStream, window: u8, slot: i16, action: i16, button: i8| {
@@ -1626,7 +1626,7 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
     until_packet(&mut client, 0x2f, |p| p.starts_with(&[0, 0, 36]));
     click(&mut client, 0, 36, 1, 0);
     let grid = click(&mut client, 0, 1, 2, 0);
-    assert_eq!(&grid[3..10], &[0, 5, 4, 0, 0, 255, 255]); // four planks
+    assert_eq!(&grid[3..9], &[0, 5, 4, 0, 0, 0]); // four planks
     click(&mut client, 0, 0, 3, 0); // consume the log
     for (slot, action) in (1..=4).zip(4..=7) {
         click(&mut client, 0, slot, action, 1);
@@ -1643,7 +1643,7 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
     place.extend_from_slice(&58i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |p| {
@@ -1679,7 +1679,7 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
     do_click(38, 0); // sticks: 2
     do_click(5, 1);
     let items = do_click(8, 1);
-    assert_eq!(&items[3..10], &[1, 14, 1, 0, 0, 255, 255]); // wooden pickaxe ID 270
+    assert_eq!(&items[3..9], &[1, 14, 1, 0, 0, 0]); // wooden pickaxe ID 270
     let crafted = do_click(0, 0);
     assert_eq!(&crafted[3..5], &(-1i16).to_be_bytes()); // recipe consumed
     client.write_all(&frame(13, &[1])).unwrap();
@@ -1707,7 +1707,7 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
         p.extend_from_slice(&id.to_be_bytes());
         p.push(count);
         p.extend_from_slice(&0i16.to_be_bytes());
-        p.extend_from_slice(&(-1i16).to_be_bytes());
+        p.push(0); // no NBT: single TAG_End byte
         frame(0x10, &p)
     };
     alice.write_all(&creative(36, 54, 1)).unwrap();
@@ -1719,7 +1719,7 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
     place.extend_from_slice(&54i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     alice.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut alice, 0x23, |p| {
@@ -1758,7 +1758,7 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
     until_packet(&mut alice, 0x2f, |p| p.starts_with(&[0, 0, 37]));
     click(&mut alice, 1, 55, 1, 0);
     let contents = click(&mut alice, 1, 0, 2, 0);
-    assert_eq!(&contents[3..10], &[0, 4, 5, 0, 0, 255, 255]);
+    assert_eq!(&contents[3..9], &[0, 4, 5, 0, 0, 0]);
 
     let stored = server.directory.join("flat.chests.json");
     await_file(&stored);
@@ -1770,7 +1770,7 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
     let second = until_packet(&mut bob, 0x2d, |p| p.first() == Some(&1));
     assert_open_window_protocol5(&second, 1, 0, "Chest", 27);
     let second_items = until_packet(&mut bob, 0x30, |p| p.starts_with(&[1, 0, 63]));
-    assert_eq!(&second_items[3..10], &[0, 4, 5, 0, 0, 255, 255]);
+    assert_eq!(&second_items[3..9], &[0, 4, 5, 0, 0, 0]);
     until_packet(&mut bob, 0x2f, |p| p.starts_with(&[255, 255, 255]));
 
     // A shift click transfers one stack, no duplication.
@@ -1811,7 +1811,7 @@ fn native_open_window_packets_cover_other_interactive_gui_blocks() {
         held.extend_from_slice(&block.to_be_bytes());
         held.push(1);
         held.extend_from_slice(&0i16.to_be_bytes());
-        held.extend_from_slice(&(-1i16).to_be_bytes());
+        held.push(0); // no NBT: single TAG_End byte
         player.write_all(&frame(0x10, &held)).unwrap();
         let item_id = block.to_be_bytes();
         until_packet(&mut player, 0x2f, |p| {
@@ -1825,7 +1825,7 @@ fn native_open_window_packets_cover_other_interactive_gui_blocks() {
         place.extend_from_slice(&block.to_be_bytes());
         place.push(1);
         place.extend_from_slice(&0i16.to_be_bytes());
-        place.extend_from_slice(&(-1i16).to_be_bytes());
+        place.push(0); // no NBT: single TAG_End byte
         place.extend_from_slice(&[8, 8, 8]);
         player.write_all(&frame(8, &place)).unwrap();
         until_packet(&mut player, 0x23, |p| p.len() >= 11 && p[4] == 64);
@@ -1868,7 +1868,7 @@ fn reg131_protocol5_chest_number_key_swaps_and_survives_reconnect() {
         payload.extend_from_slice(&id.to_be_bytes());
         payload.push(count);
         payload.extend_from_slice(&0i16.to_be_bytes());
-        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.push(0); // no NBT: single TAG_End byte
         frame(0x10, &payload)
     };
     let click = |stream: &mut TcpStream, slot: i16, button: i8, mode: i8, action: i16| {
@@ -1896,7 +1896,7 @@ fn reg131_protocol5_chest_number_key_swaps_and_survives_reconnect() {
     place.extend_from_slice(&54i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |b| {
@@ -1924,10 +1924,10 @@ fn reg131_protocol5_chest_number_key_swaps_and_survives_reconnect() {
 
     assert!(click(&mut client, 55, 0, 0, 1).0);
     let (_, stocked) = click(&mut client, 0, 0, 0, 2);
-    assert_eq!(&stocked[3..10], &[0, 17, 2, 0, 0, 255, 255]);
+    assert_eq!(&stocked[3..9], &[0, 17, 2, 0, 0, 0]);
     let (accepted, swapped) = click(&mut client, 0, 0, 2, 3);
     assert!(accepted, "C0E mode-2 chest-origin hotbar exchange rejected");
-    assert_eq!(&swapped[3..10], &[0, 5, 3, 0, 0, 255, 255]);
+    assert_eq!(&swapped[3..9], &[0, 5, 3, 0, 0, 0]);
 
     let inventory_path = server.directory.join("players/rusttester.inventory.json");
     let chest_path = server.directory.join("flat.chests.json");
@@ -1968,7 +1968,7 @@ fn native_ender_chest_is_personal_and_survives_reopening_over_tcp() {
         p.extend_from_slice(&id.to_be_bytes());
         p.push(count);
         p.extend_from_slice(&0i16.to_be_bytes());
-        p.extend_from_slice(&(-1i16).to_be_bytes());
+        p.push(0); // no NBT: single TAG_End byte
         frame(0x10, &p)
     };
     alice.write_all(&creative(36, 130, 1)).unwrap();
@@ -1980,7 +1980,7 @@ fn native_ender_chest_is_personal_and_survives_reopening_over_tcp() {
     placement.extend_from_slice(&130i16.to_be_bytes());
     placement.push(1);
     placement.extend_from_slice(&0i16.to_be_bytes());
-    placement.extend_from_slice(&(-1i16).to_be_bytes());
+    placement.push(0); // no NBT: single TAG_End byte
     placement.extend_from_slice(&[8, 8, 8]);
     alice.write_all(&frame(8, &placement)).unwrap();
     until_packet(&mut alice, 0x23, |p| p.len() >= 11 && p[4] == 64);
@@ -2023,7 +2023,7 @@ fn native_ender_chest_is_personal_and_survives_reopening_over_tcp() {
     let next = until_packet(&mut alice, 0x2d, |p| p.first() == Some(&2));
     assert_open_window_protocol5(&next, 2, 0, "Ender Chest", 27);
     let items = until_packet(&mut alice, 0x30, |p| p.starts_with(&[2, 0, 63]));
-    assert_eq!(&items[3..10], &[0, 4, 5, 0, 0, 255, 255]);
+    assert_eq!(&items[3..9], &[0, 4, 5, 0, 0, 0]);
     drop(alice);
     server.wait_idle();
 }
@@ -2037,7 +2037,7 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
         bytes.extend_from_slice(&id.to_be_bytes());
         bytes.push(count);
         bytes.extend_from_slice(&0i16.to_be_bytes());
-        bytes.extend_from_slice(&(-1i16).to_be_bytes());
+        bytes.push(0); // no NBT: single TAG_End byte
         frame(0x10, &bytes)
     };
     // Place an unlit furnace above the grass at the origin.
@@ -2050,7 +2050,7 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     place.extend_from_slice(&61i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     alice.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut alice, 0x23, |p| {
@@ -2133,7 +2133,7 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     let second_window = until_packet(&mut bob, 0x2d, |p| p.first() == Some(&1));
     assert_open_window_protocol5(&second_window, 1, 2, "Furnace", 3);
     let items = until_packet(&mut bob, 0x30, |p| p.starts_with(&[1, 0, 39]));
-    assert!(items.windows(7).any(|s| s == [1, 9, 1, 0, 0, 255, 255]));
+    assert!(items.windows(6).any(|s| s == [1, 9, 1, 0, 0, 0]));
     for property in 0..3u8 {
         until_packet(&mut bob, 0x31, |p| {
             p.len() == 5 && p[0] == 1 && p[2] == property
@@ -2172,7 +2172,7 @@ fn survival_instant_torch_mining_needs_only_start_packet() {
     place.extend_from_slice(&50i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |p| {
@@ -2232,7 +2232,7 @@ fn survival_decorative_mining_drops_blocks_and_clears_tile_state() {
         place.extend_from_slice(&held_block.to_be_bytes());
         place.push(1);
         place.extend_from_slice(&0i16.to_be_bytes());
-        place.extend_from_slice(&(-1i16).to_be_bytes());
+        place.push(0); // no NBT: single TAG_End byte
         place.extend_from_slice(&[8, 8, 8]);
         client.write_all(&frame(8, &place)).unwrap();
         until_packet(&mut client, 0x23, |p| {
@@ -2545,7 +2545,7 @@ fn survival_partial_pickup_keeps_remainder_on_the_same_entity() {
         let (pid, body) = pump(&mut client);
         saw_collect |= pid == 0x0d;
         saw_remainder_update |=
-            pid == 0x1c && body.len() == 13 && body[5..7] == [0, 3] && body[7] == 1;
+            pid == 0x1c && body.len() == 12 && body[5..7] == [0, 3] && body[7] == 1;
     }
     assert!(
         saw_remainder_update,
@@ -2771,7 +2771,7 @@ fn survival_container_break_uses_durable_world_and_ground_drop() {
         place.extend_from_slice(&block.to_be_bytes());
         place.push(1);
         place.extend_from_slice(&0i16.to_be_bytes());
-        place.extend_from_slice(&(-1i16).to_be_bytes());
+        place.push(0); // no NBT: single TAG_End byte
         place.extend_from_slice(&[8, 8, 8]);
         client.write_all(&frame(8, &place)).unwrap();
         until_packet(&mut client, 0x23, |p| {
@@ -2817,7 +2817,7 @@ fn survival_bed_head_mining_removes_both_halves_and_drops_one_bed() {
     place.extend_from_slice(&355i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |p| {
@@ -2877,7 +2877,7 @@ fn survival_upper_door_mining_removes_lower_half_and_drops_one_door() {
     place.extend_from_slice(&324i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |p| {
@@ -2960,9 +2960,9 @@ fn survival_shovel_mining_wears_out_last_use_and_persists_dirt_drop() {
     client.write_all(&frame(7, &finish)).unwrap();
     until_packet(&mut client, 0x2f, |p| p == [0, 0, 36, 255, 255]);
     let metadata = until_packet(&mut client, 0x1c, |p| {
-        p.len() >= 13 && p[4] == 0xaa && p[5..7] == [0, 3]
+        p.len() >= 12 && p[4] == 0xaa && p[5..7] == [0, 3]
     });
-    assert_eq!(&metadata[4..], &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
+    assert_eq!(&metadata[4..], &[0xaa, 0, 3, 1, 0, 0, 0, 127]);
     until_packet(&mut client, 0x23, |p| {
         p.len() >= 11 && p[4] == 63 && p[9] == 0
     });
@@ -3017,8 +3017,8 @@ fn observe_thrown_dirt(
                 }
             }
         } else if id == 0x1c
-            && body.len() == 13
-            && body[4..] == [0xaa, 0, 3, expected_count, 0, 0, 255, 255, 127]
+            && body.len() == 12
+            && body[4..] == [0xaa, 0, 3, expected_count, 0, 0, 0, 127]
         {
             metadata_ids.push(i32::from_be_bytes(body[..4].try_into().unwrap()));
         }
@@ -3040,7 +3040,7 @@ fn native_protocol5_survival_q_and_ctrl_q_drop_authoritative_stacks() {
     // not already been picked up. The same-session 1-then-11 sequence has a
     // separate controlled session test; this test exercises the normal server.
     for (action, drop_count, expected_slot) in [
-        (4u8, 1u8, &[0, 0, 36, 0, 3, 11, 0, 0, 255, 255][..]),
+        (4u8, 1u8, &[0, 0, 36, 0, 3, 11, 0, 0, 0][..]),
         (3u8, 12u8, &[0, 0, 36, 255, 255][..]),
     ] {
         check_normal_server_throw(action, drop_count, expected_slot);
@@ -3313,11 +3313,9 @@ fn native_protocol5_gravity_sand_falls_after_support_is_mined() {
     let (mut client, _, _) = server.join("RustTester");
     // Creative C10 grants one sand stack to selected hotbar slot 36.
     let mut creative = 36i16.to_be_bytes().to_vec();
-    creative.extend_from_slice(&[0, 12, 64, 0, 0, 255, 255]);
+    creative.extend_from_slice(&[0, 12, 64, 0, 0, 0]);
     client.write_all(&frame(0x10, &creative)).unwrap();
-    until_packet(&mut client, 0x2f, |b| {
-        b == [0, 0, 36, 0, 12, 64, 0, 0, 255, 255]
-    });
+    until_packet(&mut client, 0x2f, |b| b == [0, 0, 36, 0, 12, 64, 0, 0, 0]);
 
     // Place sand above grass (y64). Supported sand should remain stationary.
     let mut place = Vec::new();
@@ -3328,7 +3326,7 @@ fn native_protocol5_gravity_sand_falls_after_support_is_mined() {
     place.extend_from_slice(&12i16.to_be_bytes());
     place.push(64);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |b| {
@@ -3440,7 +3438,7 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     use_item.extend_from_slice(&1i16.to_be_bytes());
     use_item.push(2);
     use_item.extend_from_slice(&0i16.to_be_bytes());
-    use_item.extend_from_slice(&(-1i16).to_be_bytes());
+    use_item.push(0); // no NBT: single TAG_End byte
     use_item.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &use_item)).unwrap();
 
@@ -3449,7 +3447,7 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     use_item[11] = 4;
     client.write_all(&frame(8, &use_item)).unwrap();
     until_packet(&mut client, 0x2f, |packet| {
-        packet.len() == 10
+        packet.len() == 9
             && packet[..3] == [0, 0, 36]
             && packet[3..5] == 260i16.to_be_bytes()
             && packet[5] == 1
@@ -3513,10 +3511,10 @@ fn native_protocol5_light_refresh_restreams_a_chunk_after_torch_placement() {
     creative.extend_from_slice(&50i16.to_be_bytes());
     creative.push(1);
     creative.extend_from_slice(&0i16.to_be_bytes());
-    creative.extend_from_slice(&(-1i16).to_be_bytes());
+    creative.push(0); // no NBT: single TAG_End byte
     client.write_all(&frame(0x10, &creative)).unwrap();
     until_packet(&mut client, 0x2f, |body| {
-        body.len() == 10 && body[3..5] == 50i16.to_be_bytes()
+        body.len() == 9 && body[3..5] == 50i16.to_be_bytes()
     });
 
     let mut place = 0i32.to_be_bytes().to_vec();
@@ -3526,7 +3524,7 @@ fn native_protocol5_light_refresh_restreams_a_chunk_after_torch_placement() {
     place.extend_from_slice(&50i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |body| {
@@ -3573,10 +3571,10 @@ fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
         creative.extend_from_slice(&id.to_be_bytes());
         creative.push(1);
         creative.extend_from_slice(&0i16.to_be_bytes());
-        creative.extend_from_slice(&(-1i16).to_be_bytes());
+        creative.push(0); // no NBT: single TAG_End byte
         client.write_all(&frame(0x10, &creative)).unwrap();
         until_packet(&mut client, 0x2f, |body| {
-            body.len() == 10 && body[3..5] == id.to_be_bytes()
+            body.len() == 9 && body[3..5] == id.to_be_bytes()
         });
         let mut packet = x.to_be_bytes().to_vec();
         packet.push(63);
@@ -3585,7 +3583,7 @@ fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
         packet.extend_from_slice(&id.to_be_bytes());
         packet.push(1);
         packet.extend_from_slice(&0i16.to_be_bytes());
-        packet.extend_from_slice(&(-1i16).to_be_bytes());
+        packet.push(0); // no NBT: single TAG_End byte
         packet.extend_from_slice(&[8, 8, 8]);
         client.write_all(&frame(8, &packet)).unwrap();
         until_packet(&mut client, 0x23, |body| {
@@ -3727,7 +3725,7 @@ fn minecart_dismount_is_safe_in_both_modes_and_restart_preserves_position_invent
         payload.extend_from_slice(&id.to_be_bytes());
         payload.push(1);
         payload.extend_from_slice(&0i16.to_be_bytes());
-        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.push(0); // no NBT: single TAG_End byte
         frame(0x10, &payload)
     };
     let place = |x: i32, y: u8, id: i16| {
@@ -3738,7 +3736,7 @@ fn minecart_dismount_is_safe_in_both_modes_and_restart_preserves_position_invent
         payload.extend_from_slice(&id.to_be_bytes());
         payload.push(1);
         payload.extend_from_slice(&0i16.to_be_bytes());
-        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.push(0); // no NBT: single TAG_End byte
         payload.extend_from_slice(&[8, 8, 8]);
         frame(0x08, &payload)
     };
@@ -3750,7 +3748,7 @@ fn minecart_dismount_is_safe_in_both_modes_and_restart_preserves_position_invent
     // Both the rail and the cart must be present in the server-owned hotbar.
     client.write_all(&creative_slot(66)).unwrap();
     until_packet(&mut client, 0x2f, |body| {
-        body.len() == 10 && body[3..5] == 66i16.to_be_bytes()
+        body.len() == 9 && body[3..5] == 66i16.to_be_bytes()
     });
     client.write_all(&place(2, 63, 66)).unwrap();
     until_packet(&mut client, 0x23, |body| {
@@ -3762,7 +3760,7 @@ fn minecart_dismount_is_safe_in_both_modes_and_restart_preserves_position_invent
     });
     client.write_all(&creative_slot(328)).unwrap();
     until_packet(&mut client, 0x2f, |body| {
-        body.len() == 10 && body[3..5] == 328i16.to_be_bytes()
+        body.len() == 9 && body[3..5] == 328i16.to_be_bytes()
     });
 
     // A forged client slot snapshot must not authorize a cart placement.
@@ -3947,7 +3945,7 @@ fn creative_boat_placement_keeps_item_and_restores_boat_after_restart() {
         payload.extend_from_slice(&id.to_be_bytes());
         payload.push(1);
         payload.extend_from_slice(&0i16.to_be_bytes());
-        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.push(0); // no NBT: single TAG_End byte
         frame(0x10, &payload)
     };
     let place = |x: i32, y: u8, id: i16| {
@@ -3958,7 +3956,7 @@ fn creative_boat_placement_keeps_item_and_restores_boat_after_restart() {
         payload.extend_from_slice(&id.to_be_bytes());
         payload.push(1);
         payload.extend_from_slice(&0i16.to_be_bytes());
-        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.push(0); // no NBT: single TAG_End byte
         payload.extend_from_slice(&[8, 8, 8]);
         frame(0x08, &payload)
     };
@@ -3969,7 +3967,7 @@ fn creative_boat_placement_keeps_item_and_restores_boat_after_restart() {
 
     client.write_all(&creative_slot(326)).unwrap();
     until_packet(&mut client, 0x2f, |body| {
-        body.len() == 10 && body[3..5] == 326i16.to_be_bytes()
+        body.len() == 9 && body[3..5] == 326i16.to_be_bytes()
     });
     client.write_all(&place(2, 63, 326)).unwrap();
     until_packet(&mut client, 0x23, |body| {
@@ -3982,7 +3980,7 @@ fn creative_boat_placement_keeps_item_and_restores_boat_after_restart() {
 
     client.write_all(&creative_slot(333)).unwrap();
     until_packet(&mut client, 0x2f, |body| {
-        body.len() == 10 && body[3..5] == 333i16.to_be_bytes()
+        body.len() == 9 && body[3..5] == 333i16.to_be_bytes()
     });
     client.write_all(&place(2, 64, 333)).unwrap();
     let spawned = until_packet(&mut client, 0x0e, is_boat_spawn);
@@ -4075,7 +4073,7 @@ fn survival_boat_consumes_item_and_drops_boat_when_broken() {
         payload.extend_from_slice(&id.to_be_bytes());
         payload.push(1);
         payload.extend_from_slice(&0i16.to_be_bytes());
-        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.push(0); // no NBT: single TAG_End byte
         payload.extend_from_slice(&[8, 8, 8]);
         frame(0x08, &payload)
     };
@@ -4647,7 +4645,7 @@ fn survival_cobweb_fall_resets_fall_damage_like_legacy() {
     place.extend_from_slice(&30i16.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&0i16.to_be_bytes());
-    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.push(0); // no NBT: single TAG_End byte
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |p| block_change_is(p, 64, 30));

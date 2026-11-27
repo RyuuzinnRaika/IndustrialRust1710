@@ -143,7 +143,7 @@ fn creative_set(socket: &mut BufferedClient, slot: i16, id: i16, count: u8) {
     p.extend_from_slice(&id.to_be_bytes());
     p.push(count);
     p.extend_from_slice(&0i16.to_be_bytes());
-    p.extend_from_slice(&(-1i16).to_be_bytes());
+    p.push(0); // no NBT: single TAG_End byte
     socket.write_all(&frame(0x10, &p)).unwrap();
     socket.flush().unwrap();
     // Set Slot (0x2F) confirmation for window 0, this exact slot.
@@ -184,7 +184,7 @@ fn left_click(socket: &mut BufferedClient, window: u8, slot: i16, action: i16) {
     p.push(0); // left button
     p.extend_from_slice(&action.to_be_bytes());
     p.push(0); // mode: normal click
-    p.extend_from_slice(&(-1i16).to_be_bytes());
+    p.extend_from_slice(&(-1i16).to_be_bytes()); // empty slot claim stays Short -1
     socket.write_all(&frame(0x0e, &p)).unwrap();
     socket.flush().unwrap();
     let want = [window, action.to_be_bytes()[0], action.to_be_bytes()[1], 1];

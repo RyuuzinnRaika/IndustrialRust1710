@@ -1,7 +1,8 @@
-//! Lossless, bounded Protocol 5 ItemStack NBT in an interned process-local arena.
-//! A Stack remains Copy; its handle is never serialized as an integer. Saves
-//! embed the *original compressed NBT bytes*, which are re-interned on load.
-//! This preserves the wire representation and all unknown tags through moves.
+//! Lossless, bounded Protocol 5 ItemStack NBT in an interned process-local
+//! arena. A Stack remains Copy; its handle is never serialized as an
+//! integer. Saves embed the *original compressed NBT bytes*, which are
+//! re-interned on load, preserving every unknown tag through moves. The
+//! vanilla Slot wire carries the same tree uncompressed and self-terminating.
 use fastnbt::Value;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::{Deserialize, Deserializer, Serializer};
@@ -118,7 +119,13 @@ fn payload(raw: &[u8], offset: &mut usize, kind: u8) -> io::Result<Option<Contai
     Ok(None)
 }
 
-fn validate_nbt_wire(raw: &[u8]) -> io::Result<()> {
+/// Walk one self-delimiting NBT structure from the start of `raw` and
+/// return its exact end offset. The iterative traversal bounds nesting
+/// even when fastnbt's Value recursion would otherwise exhaust the stack;
+/// array lengths are checked *before* allocating their decoded
+/// representation. Callers reading an untrusted stream can consume
+/// precisely this many bytes once the scan succeeds.
+pub(crate) fn scan_nbt_wire(raw: &[u8]) -> io::Result<usize> {
     let mut offset = 0;
     if byte(raw, &mut offset)? != 10 {
         return Err(invalid("ItemStack NBT root must be compound"));
@@ -154,10 +161,44 @@ fn validate_nbt_wire(raw: &[u8]) -> io::Result<()> {
             stack.push(child);
         }
     }
-    if offset != raw.len() {
+    Ok(offset)
+}
+
+fn validate_nbt_wire(raw: &[u8]) -> io::Result<()> {
+    if scan_nbt_wire(raw)? != raw.len() {
         return Err(invalid("trailing ItemStack NBT data"));
     }
     Ok(())
+}
+
+/// Decompress a stored arena/book blob for the vanilla wire. Protocol 5
+/// Slot embeds *uncompressed, self-delimiting* NBT, so the gzip blob is
+/// expanded at encode time, bounded by the same MAX_DECOMPRESSED limit
+/// the ingest path enforces. None means the blob violates its own stored
+/// invariant; callers must never splice corrupt bytes into a packet.
+pub fn uncompressed(compressed: &[u8]) -> Option<Vec<u8>> {
+    let mut raw = Vec::new();
+    GzDecoder::new(compressed)
+        .take((MAX_DECOMPRESSED + 1) as u64)
+        .read_to_end(&mut raw)
+        .ok()?;
+    if raw.is_empty() || raw.len() > MAX_DECOMPRESSED {
+        return None;
+    }
+    Some(raw)
+}
+
+/// Intern uncompressed, self-delimiting ItemStack NBT (the vanilla Slot
+/// wire form) through the same bounded gzip arena path used for disk and
+/// for the old compressed ingest, so the stored format stays unchanged.
+pub fn intern_uncompressed(raw: &[u8]) -> io::Result<u64> {
+    if raw.is_empty() || raw.len() > MAX_DECOMPRESSED {
+        return Err(invalid("invalid uncompressed ItemStack NBT length"));
+    }
+    validate_nbt_wire(raw)?;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(raw)?;
+    intern(&encoder.finish()?)
 }
 
 fn decoded(bytes: &[u8]) -> io::Result<Value> {
@@ -357,5 +398,38 @@ mod tests {
             assert!(validate_nbt_wire(bytes).is_err());
             assert!(intern(&gzip_raw(bytes)).is_err());
         }
+    }
+
+    #[test]
+    fn slot_envelope_scan_returns_exact_structure_end() {
+        // Root Compound { Short "d"=7 }, then unrelated bytes that must stay
+        // outside the consumed structure for the Slot reader.
+        let mut raw = vec![10, 0, 0, 2, 0, 1, b'd', 0, 7, 0];
+        let end = scan_nbt_wire(&raw).unwrap();
+        assert_eq!(end, raw.len());
+        raw.extend_from_slice(&[99, 100]);
+        assert_eq!(scan_nbt_wire(&raw).unwrap(), end);
+        assert!(validate_nbt_wire(&raw).is_err());
+        // A truncated compound reports no boundary at all.
+        assert!(scan_nbt_wire(&[10, 0, 0, 10, 0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn intern_uncompressed_roundtrips_and_rejects_bombs_without_minting() {
+        let raw = nested_compound(3);
+        let handle = intern_uncompressed(&raw).unwrap();
+        assert_eq!(
+            value(handle).unwrap(),
+            fastnbt::from_bytes::<Value>(&raw).unwrap()
+        );
+        // The wire encoder re-expands the stored gzip blob losslessly.
+        assert_eq!(uncompressed(&wire(handle).unwrap()).unwrap(), raw);
+        // Deep-nesting bombs, gzip-magic input, truncated envelopes and
+        // empty input are rejected before anything is interned.
+        assert!(intern_uncompressed(&nested_compound(MAX_NBT_DEPTH)).is_err());
+        assert!(intern_uncompressed(&[0x1f, 0x8b, 8, 0]).is_err());
+        assert!(intern_uncompressed(&[10, 0, 0, 10, 0, 0, 0]).is_err());
+        assert!(intern_uncompressed(&[]).is_err());
+        assert!(uncompressed(&[0x1f, 0x8b, 0xff]).is_none());
     }
 }

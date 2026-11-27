@@ -315,12 +315,11 @@ fn live_protocol5_entity_chunk_inventory_and_window_golden() {
     );
 }
 
-/// Round-trip a compressed NBT-tagged Creative item through the running
+/// Round-trip a raw-NBT-tagged Creative item through the running
 /// Protocol 5 server. This checks packet boundaries beyond the unit parser.
 #[test]
 fn live_protocol5_creative_nbt_roundtrip_and_invalid_tag_recovery() {
     use fastnbt::Value;
-    use flate2::{write::GzEncoder, Compression};
     use std::collections::HashMap;
 
     let _live_guard = LIVE_SERVER_LOCK.lock().unwrap();
@@ -342,13 +341,11 @@ fn live_protocol5_creative_nbt_roundtrip_and_invalid_tag_recovery() {
         ),
     ]));
     let raw = fastnbt::to_bytes(&root).unwrap();
-    let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
-    gzip.write_all(&raw).unwrap();
-    let compressed = gzip.finish().unwrap();
 
+    // Vanilla Slot: id/count/damage followed by the raw, self-delimiting
+    // NBT envelope — no short length, no compression.
     let mut slot = Vec::from([0, 36, 1, 20, 1, 0, 0]); // diamond sword 276
-    slot.extend_from_slice(&(compressed.len() as i16).to_be_bytes());
-    slot.extend_from_slice(&compressed);
+    slot.extend_from_slice(&raw);
     alpha.write_all(&packet(0x10, &slot)).unwrap();
 
     let mut expected = vec![0]; // S2F window ID
@@ -367,9 +364,13 @@ fn live_protocol5_creative_nbt_roundtrip_and_invalid_tag_recovery() {
     }
     assert!(found, "server failed to preserve creative NBT on S2F");
 
-    // A bad gzip Compound is an application rejection, not a disconnect.
+    // A truncated envelope has no structure end: the claim is rejected as
+    // an application decision, not a disconnect.
     alpha
-        .write_all(&packet(0x10, &[0, 36, 1, 20, 1, 0, 0, 0, 3, 10, 0, 0]))
+        .write_all(&packet(
+            0x10,
+            &[0, 36, 1, 20, 1, 0, 0, 0x0A, 0x00, 0x00, 0x0A, 0x00],
+        ))
         .unwrap();
     let mut resynced = false;
     for _ in 0..40 {
@@ -387,13 +388,13 @@ fn live_protocol5_creative_nbt_roundtrip_and_invalid_tag_recovery() {
 
     // Confirm connection remains usable after rejected NBT.
     alpha
-        .write_all(&packet(0x10, &[0, 36, 0, 4, 64, 0, 0, 255, 255]))
+        .write_all(&packet(0x10, &[0, 36, 0, 4, 64, 0, 0, 0]))
         .unwrap();
     let mut usable = false;
     for _ in 0..40 {
         let (id, body) = received(&mut alpha);
         match id {
-            0x2f if body == [0, 0, 36, 0, 4, 64, 0, 0, 255, 255] => {
+            0x2f if body == [0, 0, 36, 0, 4, 64, 0, 0, 0] => {
                 usable = true;
                 break;
             }
@@ -416,7 +417,7 @@ fn live_protocol5_creative_slot_set_and_clear_golden() {
 
     // Slot 36 = first hotbar slot, item 4 = cobblestone, 64, damage 0,
     // NBT length -1. This is Protocol 5, not modern Slot/NBT encoding.
-    let create = packet(0x10, &[0, 36, 0, 4, 64, 0, 0, 255, 255]);
+    let create = packet(0x10, &[0, 36, 0, 4, 64, 0, 0, 0]);
     // A TCP split across the frame-length and packet-ID boundary must not
     // silently lose the write when the server's read poll times out.
     alpha.write_all(&create[..1]).unwrap();
@@ -430,7 +431,7 @@ fn live_protocol5_creative_slot_set_and_clear_golden() {
             0x2f => {
                 assert_eq!(
                     body,
-                    [0, 0, 36, 0, 4, 64, 0, 0, 255, 255],
+                    [0, 0, 36, 0, 4, 64, 0, 0, 0],
                     "server-authoritative S2F filled slot bytes"
                 );
                 created = true;

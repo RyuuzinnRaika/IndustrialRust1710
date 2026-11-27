@@ -172,20 +172,9 @@ impl Hanging {
         };
         let mut body = self.id.to_be_bytes().to_vec();
         body.push(0xa8); // type 5 (Slot), index 8 for 1.7.10 Item Frame
-        match item {
-            Some(stack) => {
-                body.extend_from_slice(&stack.id.to_be_bytes());
-                body.push(stack.count);
-                body.extend_from_slice(&stack.damage.to_be_bytes());
-                if let Some(nbt) = crate::books::wire_nbt(*stack) {
-                    body.extend_from_slice(&(nbt.len() as i16).to_be_bytes());
-                    body.extend_from_slice(&nbt);
-                } else {
-                    body.extend_from_slice(&(-1i16).to_be_bytes());
-                }
-            }
-            None => body.extend_from_slice(&(-1i16).to_be_bytes()),
-        }
+                         // One ordinary vanilla Slot: -1 when empty, otherwise id/count/
+                         // damage plus uncompressed self-delimiting NBT (TAG_End when none).
+        crate::inventory::Inventory::encode_slot(&mut body, *item);
         body.push(9); // type 0 (Byte), datawatcher index 9 rotation
         body.push(*rotation);
         body.push(127); // End of metadata
