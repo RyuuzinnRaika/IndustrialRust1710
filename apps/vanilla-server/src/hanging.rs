@@ -211,9 +211,19 @@ impl Hanging {
                 Ok(vec![Event { id: 0x10, body }])
             }
             Kind::Frame { .. } => {
+                // Vanilla's EntityTrackerEntry sends floor(pos * 32) of the
+                // frame's integer wall-block position; the 1.7.10 client
+                // case-71 handler recovers that block with (int)(coord /
+                // 32.0) before setDirection reads the face from the data
+                // int. Sending at * 32 + 16 (the air-cell center) floated
+                // the frame half a block off the wall, and the (int)
+                // truncation toward zero shifted every negative coordinate
+                // one whole block over.
                 body.push(71); // object spawn entity: item frame
-                for &coordinate in &self.at {
-                    body.extend_from_slice(&(coordinate * 32 + 16).to_be_bytes());
+                let (dx, dz) = offset(self.face);
+                let wall = [self.at[0] - dx, self.at[1], self.at[2] - dz];
+                for &coordinate in &wall {
+                    body.extend_from_slice(&(coordinate * 32).to_be_bytes());
                 }
                 body.push(0); // pitch
                 body.push(0); // yaw
@@ -552,6 +562,62 @@ mod tests {
         let (_, removed) = state.stage_remove(frame.id).unwrap().unwrap();
         assert_eq!(removed.drops().len(), 2);
         assert_eq!(removed.drops()[1].count, 1);
+    }
+
+    /// Audit #1320: the frame's 0x0E spawn coordinates must be the wall
+    /// block times 32, so the vanilla client's (int)(coord / 32.0) cast
+    /// recovers the true wall cell on every axis — including negatives,
+    /// where the removed `+ 16` air-cell center offset truncated one whole
+    /// block over toward zero.
+    #[test]
+    fn audit1320_frame_spawn_reports_wall_block_times_32_including_negative_axes() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 1 << 4).unwrap();
+        world.import_block(-1, 64, -2, 1 << 4).unwrap();
+        let (state, positive_wall) = Hangings::default()
+            .stage_place(&world, (0, 64, 0), 3, 389)
+            .unwrap()
+            .unwrap();
+        let (_, negative_wall) = state
+            .stage_place(&world, (-1, 64, -2), 3, 389)
+            .unwrap()
+            .unwrap();
+        let decoded = |hanging: &Hanging| -> ([i32; 3], (i32, i32, i32)) {
+            let body = hanging.spawn().unwrap()[0].body.clone();
+            let mut head = 0;
+            while body[head] & 0x80 != 0 {
+                head += 1;
+            }
+            head += 1; // past the entity-id VarInt
+            assert_eq!(body[head], 71, "item frame object type");
+            let coords = [
+                i32::from_be_bytes(body[head + 1..head + 5].try_into().unwrap()),
+                i32::from_be_bytes(body[head + 5..head + 9].try_into().unwrap()),
+                i32::from_be_bytes(body[head + 9..head + 13].try_into().unwrap()),
+            ];
+            // The client casts with integer division toward zero.
+            (
+                coords,
+                (
+                    (coords[0] as f64 / 32.0) as i32,
+                    (coords[1] as f64 / 32.0) as i32,
+                    (coords[2] as f64 / 32.0) as i32,
+                ),
+            )
+        };
+        // Wall (0, 64, 0), face 3 (south): air cell (0, 64, 1).
+        let (coords, recovered) = decoded(&positive_wall);
+        assert_eq!(coords, [0, 64 * 32, 0]);
+        assert_eq!(recovered, (0, 64, 0), "client recovers the wall block");
+        // Wall (-1, 64, -2): with the old +16 center offset the x cast
+        // truncated to 0 and the z cast to 0 — a whole block off.
+        let (coords, recovered) = decoded(&negative_wall);
+        assert_eq!(coords, [-32, 64 * 32, -64]);
+        assert_eq!(
+            recovered,
+            (-1, 64, -2),
+            "negative wall block must survive the (int)(coord / 32.0) cast"
+        );
     }
     #[test]
     fn crossing_chunk_boundary_replays_only_newly_visible_entities() {
