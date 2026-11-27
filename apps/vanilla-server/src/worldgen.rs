@@ -1969,6 +1969,73 @@ mod tests {
         );
     }
 
+    /// NEXT-054: dungeon-chest loot must be reproducible for a fixed seed —
+    /// identical contents AND identical slot order — across both negative
+    /// and positive generation cells. Sweeps a fixed cell window for two
+    /// seeds (one with high bits set), then pins every discovered chest's
+    /// loot against a golden table so any future RNG change becomes a
+    /// visible regression instead of a silent re-roll.
+    #[test]
+    fn next054_dungeon_loot_is_seed_reproducible_including_slot_order() {
+        let pool: [i16; 8] = [265, 266, 331, 287, 296, 322, 329, 2256];
+        let mut discovered = 0usize;
+        for seed in [42u64, 0xFFFF_FFFF_1234_5678] {
+            for gx in -2..=2 {
+                for gz in -2..=2 {
+                    let (cx, sy, cz) = dungeon_spawner_in_cell(seed, gx, gz);
+                    let chest = (cx + 2, sy, cz);
+                    let first = dungeon_loot(seed, chest.0, chest.1, chest.2);
+                    let second = dungeon_loot(seed, chest.0, chest.1, chest.2);
+                    assert_eq!(first, second, "loot changed between passes");
+                    let loot = first.expect("every spawner cell carries a loot chest");
+                    for (slot, (item, count)) in loot.iter().enumerate() {
+                        assert!(
+                            pool.contains(item),
+                            "slot {slot} item {item} outside the pinned pool"
+                        );
+                        assert!((1..=4).contains(count), "slot {slot} count {count}");
+                    }
+                    discovered += 1;
+                }
+            }
+        }
+        assert_eq!(discovered, 50, "two seeds x 25 cells");
+    }
+
+    /// NEXT-054 golden: a single FNV-1a hash over the full position-ordered
+    /// loot table (two seeds x 25 cells, each chest's 3 slots in wire order).
+    /// Order-sensitive: any change to RNG, pool order or slot composition
+    /// changes this constant.
+    #[test]
+    fn next054_dungeon_loot_golden_hash_over_full_sweep() {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |value: u64| {
+            for byte in value.to_le_bytes() {
+                h ^= u64::from(byte);
+                h = h.wrapping_mul(0x1000_0000_01b3);
+            }
+        };
+        for seed in [42u64, 0xFFFF_FFFF_1234_5678] {
+            feed(seed);
+            for gx in -2..=2 {
+                for gz in -2..=2 {
+                    feed(gx as u32 as u64);
+                    feed(gz as u32 as u64);
+                    let (cx, sy, cz) = dungeon_spawner_in_cell(seed, gx, gz);
+                    feed(cx as u32 as u64);
+                    feed(sy as u32 as u64);
+                    feed(cz as u32 as u64);
+                    let loot = dungeon_loot(seed, cx + 2, sy, cz).expect("loot chest");
+                    for (item, count) in loot {
+                        feed(u64::from(item as u16));
+                        feed(u64::from(count));
+                    }
+                }
+            }
+        }
+        assert_eq!(h, 5_671_599_425_586_539_196, "next054 golden loot hash");
+    }
+
     /// REG-172 / #808: ravines are one candidate per 128x128 region and must
     /// be evaluated against neighbouring regions so cliffs never terminate at
     /// a seam. Pin corridor continuity across a 128-block region seam and an
