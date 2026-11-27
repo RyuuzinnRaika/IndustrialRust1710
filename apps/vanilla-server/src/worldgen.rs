@@ -1953,6 +1953,40 @@ mod tests {
         }
         assert!(tested_negative && tested_positive);
     }
+    /// NEXT-058: villages must contain no loot chests until a smithy exists.
+    /// The IRW4 village generator emits wells, roads, houses and farms only;
+    /// the double-loot invariant for a future smithy chest is enforced by the
+    /// persistent claim marker in `chests::Chests::initialize_generated`, not
+    /// by generation. This test pins the absence so a chest added without the
+    /// claim path is caught immediately.
+    #[test]
+    fn next058_village_generation_emits_no_chest_blocks() {
+        let mut tested = 0usize;
+        for seed in [42u64, 0xFFFF_FFFF_1234_5678] {
+            for gx in -2..=2 {
+                for gz in -2..=2 {
+                    let Some((cx, base, cz)) = village_center(seed, gx * 192 + 48, gz * 192 + 48)
+                    else {
+                        continue;
+                    };
+                    tested += 1;
+                    for x in cx - 31..=cx + 31 {
+                        for z in cz - 26..=cz + 26 {
+                            for y in base - 4..=base + 7 {
+                                assert_ne!(
+                                    village(seed, x, y, z),
+                                    Some(b(54)),
+                                    "village chest at ({x}, {y}, {z}) without a claim path"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(tested > 0, "seeds must produce at least one village cell");
+    }
+
     #[test]
     fn generated_dungeons_have_spawner_and_loot() {
         let seed = 42u64;

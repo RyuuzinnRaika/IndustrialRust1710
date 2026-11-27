@@ -519,6 +519,45 @@ mod tests {
         assert_both(&left_refilled, Some(8));
     }
 
+    /// NEXT-058: the generated-loot claim must survive repeated server
+    /// restart cycles (save/reload) and must never re-grant loot, including
+    /// after the chest is emptied and after the world around it changes.
+    #[test]
+    fn next058_generated_loot_claim_survives_repeated_reload_cycles() {
+        let file =
+            std::env::temp_dir().join(format!("ir1710-next058-chest-{}.json", std::process::id()));
+        let _ = fs::remove_file(&file);
+        let pos = (-300, 20, 512);
+        let loot = [(265, 4), (331, 2), (296, 1)];
+        let mut chests = Chests::default();
+        chests.initialize_generated(&file, pos, loot).unwrap();
+        assert_eq!(chests.slots(pos)[2].unwrap().id, 265);
+        for cycle in 0..3 {
+            let mut restored = Chests::load(&file).unwrap();
+            restored.initialize_generated(&file, pos, loot).unwrap();
+            assert_eq!(
+                restored.slots(pos)[2].unwrap().count,
+                4,
+                "loot re-granted in reload cycle {cycle}"
+            );
+            assert_eq!(restored.slots(pos)[1], None);
+        }
+        let mut emptied = Chests::load(&file).unwrap();
+        emptied.update(&file, pos, [None; CHEST_SLOTS]).unwrap();
+        let mut after = Chests::load(&file).unwrap();
+        after.initialize_generated(&file, pos, loot).unwrap();
+        assert!(
+            !after.is_nonempty(pos),
+            "claim lost after emptying + reload"
+        );
+        // A different position is unaffected by the first chest's claim.
+        after
+            .initialize_generated(&file, (pos.0 + 1, pos.1, pos.2), loot)
+            .unwrap();
+        assert!(after.is_nonempty((pos.0 + 1, pos.1, pos.2)));
+        let _ = fs::remove_file(file);
+    }
+
     #[test]
     fn generated_chest_loot_is_claimed_once_even_after_emptying() {
         let file =
