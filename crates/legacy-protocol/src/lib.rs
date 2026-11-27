@@ -5,6 +5,32 @@ pub const MAX_FRAME_BYTES: usize = 1_048_576;
 fn invalid(s: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, s)
 }
+
+/// Identifies an EOF returned by `BufferedFrameReader` after receiving an
+/// incomplete frame. No packet bytes are retained by this error value.
+#[derive(Debug)]
+struct TruncatedFrameEof;
+
+impl std::fmt::Display for TruncatedFrameEof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("truncated frame")
+    }
+}
+
+impl std::error::Error for TruncatedFrameEof {}
+
+/// Returns whether the direct `BufferedFrameReader::poll` error marks a
+/// `Read::read` returning `Ok(0)` with an incomplete frame buffered. The error
+/// kind remains `UnexpectedEof`; this does not indicate why the reader reported
+/// EOF. Wrapped errors and errors returned directly by the underlying reader
+/// are not classified by this function.
+pub fn is_truncated_frame_eof(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::UnexpectedEof
+        && error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<TruncatedFrameEof>())
+            .is_some()
+}
 pub fn write_varint(mut n: u32, out: &mut Vec<u8>) {
     loop {
         if n & !127 == 0 {
@@ -99,7 +125,13 @@ impl BufferedFrameReader {
         }
         let mut buf = [0u8; 8192];
         let count = match reader.read(&mut buf[..capacity.min(8192)]) {
-            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(0) if self.received.is_empty() => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    TruncatedFrameEof,
+                ))
+            }
             Ok(count) => count,
             Err(error)
                 if matches!(
