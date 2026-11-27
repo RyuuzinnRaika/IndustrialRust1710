@@ -9,6 +9,11 @@ use std::path::{Component, Path, PathBuf};
 
 const MAX_PROPERTIES_BYTES: u64 = 64 * 1024;
 
+/// Vanilla `spawn-protection` default radius, unchanged since the 1.7.10
+/// era. 0 disables protection entirely. This is the single source of truth
+/// for both server.properties parsing and the CLI fallback in main().
+pub const DEFAULT_SPAWN_PROTECTION: i32 = 16;
+
 /// Explain the actual authentication risk of the requested listener.
 /// A name whitelist in offline-mode is NOT identity authentication.
 pub fn offline_exposure_warning(bind: SocketAddr, online_mode: bool) -> Option<&'static str> {
@@ -54,6 +59,9 @@ pub struct ServerProperties {
     pub hardcore: bool,
     pub online_mode: bool,
     pub difficulty: u8,
+    /// Vanilla `spawn-protection`: protected square radius (Chebyshev)
+    /// around the world spawn. Parsed clamped to 0..=65535; 0 disables.
+    pub spawn_protection: i32,
     pub level_name: String,
     /// Seed for the opt-in IRW3 biome generator, not FLAT terrain.
     // Also compiled by the standalone vanilla-check-config binary, which does not
@@ -204,6 +212,18 @@ impl ServerProperties {
         if difficulty > 3 {
             return Err(invalid_property("difficulty", "an integer in 0..=3"));
         }
+        // Vanilla reads spawn-protection as an int; negative values behave
+        // exactly like 0 (protection disabled). Clamp so the stored radius is
+        // always a non-negative protected-square radius in 0..=65535.
+        let spawn_protection = match values.get("spawn-protection") {
+            Some(text) => text
+                .parse::<i32>()
+                .map_err(|_| {
+                    invalid_property("spawn-protection", "an integer in 0..=65535 (0 disables)")
+                })?
+                .clamp(0, 65_535),
+            None => DEFAULT_SPAWN_PROTECTION,
+        };
         if hardcore && (!survival || difficulty != 3) {
             return Err(invalid(
                 "hardcore requires gamemode=survival and difficulty=3",
@@ -260,6 +280,7 @@ impl ServerProperties {
             "enable-query",
             "view-distance",
             "difficulty",
+            "spawn-protection",
             "max-players",
             "level-seed",
             "level-type",
@@ -283,6 +304,7 @@ impl ServerProperties {
             hardcore,
             online_mode,
             difficulty,
+            spawn_protection,
             level_name: level_name.to_string(),
             level_seed,
         })
@@ -356,6 +378,7 @@ gamemode=1
         assert_eq!(p.world_path, PathBuf::from("TestWorld/flat.irw"));
         assert!(!p.survival);
         assert!(!p.hardcore);
+        assert_eq!(p.spawn_protection, 16, "vanilla spawn-protection default");
         let hardcore = SAFE
             .replace("gamemode=1", "gamemode=0")
             .replace("difficulty=1", "difficulty=3");
@@ -398,6 +421,36 @@ gamemode=1
             assert!(ServerProperties::parse(&bad).is_err(), "{bad}");
         }
         assert!(ServerProperties::parse("level-name=world").is_err());
+    }
+    /// #1318: `spawn-protection` accepts the vanilla default 16 and 0
+    /// (disabled); out-of-range integers clamp into 0..=65535 instead of
+    /// refusing startup, while non-numeric values fail closed and name the
+    /// offending key.
+    #[test]
+    fn spawn_protection_defaults_clamps_and_rejects_non_numeric() {
+        assert_eq!(ServerProperties::parse(SAFE).unwrap().spawn_protection, 16);
+        for (value, expected) in [
+            ("0", 0),               // explicitly disabled
+            ("8", 8),               // explicit radius
+            ("-5", 0),              // negative behaves as disabled
+            ("65535", 65_535),      // upper edge
+            ("65536", 65_535),      // clamped
+            ("2147483647", 65_535), // i32::MAX clamps down
+        ] {
+            let input = format!("{SAFE}spawn-protection={value}\n");
+            let parsed = ServerProperties::parse(&input)
+                .unwrap_or_else(|error| panic!("spawn-protection={value}: {error}"));
+            assert_eq!(parsed.spawn_protection, expected, "{value}");
+        }
+        for value in ["abc", "1.5", ""] {
+            let input = format!("{SAFE}spawn-protection={value}\n");
+            let error = ServerProperties::parse(&input).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            assert!(
+                error.to_string().contains("spawn-protection"),
+                "error must name the key: {error}"
+            );
+        }
     }
 
     #[test]

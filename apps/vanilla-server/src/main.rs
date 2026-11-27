@@ -66,6 +66,7 @@ mod scoreboard;
 mod security_limits;
 mod server_config;
 mod session_lock;
+mod spawn_protection;
 mod spawnpoint;
 mod survival;
 mod survival_damage;
@@ -1753,6 +1754,8 @@ struct PlayerSession<'a> {
     session_dimension: &'a mut dimensions::Dimension,
     survival: bool,
     hardcore: bool,
+    /// server.properties `spawn-protection` radius (0..=65535, 0 disables).
+    spawn_protection: i32,
     difficulty: &'a AtomicU8,
     game_rules: &'a Mutex<GameRules>,
     scoreboard: &'a Mutex<Scoreboard>,
@@ -1917,6 +1920,7 @@ fn play(
         session_dimension,
         mut survival,
         hardcore,
+        spawn_protection,
         difficulty,
         game_rules,
         scoreboard,
@@ -1993,6 +1997,21 @@ fn play(
     let mut last_vitals_tick = clock.ticks();
     let mut admission_check = started;
     let mut permissions = administration.permission(name)?;
+    // #1318: resolve the vanilla spawn-protection square once at admission
+    // and refresh it on the same bounded interval as permissions, so the
+    // first configured operator (auto-enable) or an OP grant/revoke takes
+    // effect quickly. Per packet enforcement is pure integer math with no
+    // disk access; resolution reads only the small ops/worldspawn files.
+    let admission_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+    let mut spawn_guard = spawn_protection::Policy::resolve(
+        spawn_protection,
+        administration,
+        name,
+        verified_uuid,
+        root_world_path,
+        &admission_world,
+    );
+    drop(admission_world);
     let mut chat_limiter = ChatLimiter::default();
     let mut saved_at = started;
     // Keep fragmented TCP frames across short receive timeouts.
@@ -2653,6 +2672,18 @@ fn play(
                 return Ok(());
             }
             permissions = administration.permission(name)?;
+            // #1318: operators appearing for the first time (or being
+            // revoked) flip spawn protection within the same refresh tick.
+            let refresh_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            spawn_guard = spawn_protection::Policy::resolve(
+                spawn_protection,
+                administration,
+                name,
+                verified_uuid,
+                root_world_path,
+                &refresh_world,
+            );
+            drop(refresh_world);
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
@@ -4628,6 +4659,22 @@ fn play(
                 let z = input.i32()?;
                 input.i8()?; // face
                 input.finish()?;
+                // #1318: vanilla spawn protection. Start-dig (0) and
+                // finish-dig (2) inside the protected square are refused
+                // for non-operators: nothing mutates, any pending mining
+                // progress is dropped, and the authoritative block is sent
+                // back as a single-block change (0x23). Abort (1) and the
+                // inventory-drop actions (3/4) carry no block mutation and
+                // must stay available. Never a kick.
+                if matches!(action, 0 | 2) && world::in_bounds(x, y, z) && spawn_guard.blocks(x, z)
+                {
+                    mining = None;
+                    let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let event = block_change_event(&w, x, y, z);
+                    drop(w);
+                    send(s, event.id, &event.body)?;
+                    continue;
+                }
                 if survival {
                     if action == 5 {
                         eating = None; // Release Use Item.
@@ -5460,6 +5507,36 @@ fn play(
                 let held = input.slot()?;
                 input.take(3)?; // cursor x/y/z
                 input.finish()?;
+                // #1318: vanilla spawn protection for every block-targeted
+                // click that rides packet 8: placement, chest/furnace/
+                // hopper/brewing/anvil opening, button/lever/door/note-block
+                // use and decoration interaction. Inside the protected
+                // square a non-operator gets the authoritative clicked
+                // block back (0x23) and nothing mutates. Both the clicked
+                // column (covers use/open actions on a protected block) and
+                // the face-adjacent column where a new block would land
+                // (covers reaching into the square from outside) are tested.
+                // The air-use sentinel (face -1 at -1,255,-1) is not a
+                // block action, so eating, bow-draw, fishing and throwing
+                // stay available. Never a kick.
+                let place_target = match face {
+                    0 => Some((x, y - 1, z)),
+                    1 => Some((x, y + 1, z)),
+                    2 => Some((x, y, z - 1)),
+                    3 => Some((x, y, z + 1)),
+                    4 => Some((x - 1, y, z)),
+                    5 => Some((x + 1, y, z)),
+                    _ => None,
+                };
+                let touches_protection = spawn_guard.blocks(x, z)
+                    || place_target.is_some_and(|(tx, _, tz)| spawn_guard.blocks(tx, tz));
+                if (0..=5).contains(&face) && world::in_bounds(x, y, z) && touches_protection {
+                    let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let event = block_change_event(&w, x, y, z);
+                    drop(w);
+                    send(s, event.id, &event.body)?;
+                    continue;
+                }
 
                 // Protocol 5 Use Item: air target is (-1,255,-1), face -1.
                 // Only an authenticated, selected inventory stack can be used.
@@ -7872,6 +7949,9 @@ struct ServerContext {
     hanging_path: Arc<PathBuf>,
     survival: bool,
     hardcore: bool,
+    /// #1318 `spawn-protection` radius (0..=65535, 0 disables). Applied to
+    /// all dimensions; the operators list auto-disables it when empty.
+    spawn_protection: i32,
     difficulty: Arc<AtomicU8>,
     game_rules: Arc<Mutex<GameRules>>,
     scoreboard: Arc<Mutex<Scoreboard>>,
@@ -7938,6 +8018,7 @@ fn handle(
         hanging_path,
         survival,
         hardcore,
+        spawn_protection,
         difficulty,
         game_rules,
         scoreboard,
@@ -8323,6 +8404,7 @@ fn handle(
                 session_dimension: &mut session_dimension,
                 survival,
                 hardcore,
+                spawn_protection,
                 difficulty: &difficulty,
                 game_rules: &game_rules,
                 scoreboard: &scoreboard,
@@ -9448,10 +9530,11 @@ fn main() -> io::Result<()> {
             ));
         }
         println!(
-            "Configuration accepted: bind={}, world={}, difficulty={}, seed={:?} (read-only)",
+            "Configuration accepted: bind={}, world={}, difficulty={}, spawn-protection={}, seed={:?} (read-only)",
             props.bind,
             props.world_path.display(),
             props.difficulty,
+            props.spawn_protection,
             props.level_seed
         );
         return Ok(());
@@ -9496,6 +9579,15 @@ fn main() -> io::Result<()> {
     let hardcore = properties.as_ref().is_some_and(|config| config.hardcore);
     let mut online_mode = properties.as_ref().is_some_and(|config| config.online_mode);
     let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
+    // #1318: vanilla spawn-protection. server.properties wins; the CLI can
+    // override it for isolated deployments and tests. The value stays in
+    // 0..=65535 (0 disables); protection additionally auto-disables while
+    // the operators list is empty.
+    let mut spawn_protection = properties
+        .as_ref()
+        .map_or(server_config::DEFAULT_SPAWN_PROTECTION, |config| {
+            config.spawn_protection
+        });
     let mut requested_seed: Option<u64> = None;
     let mut biome_seed: Option<u64> = properties.as_ref().and_then(|config| config.level_seed);
     let mut expanded_seed: Option<u64> = None;
@@ -9505,7 +9597,7 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--online-mode] [--survival] [--recover-level-dat STOPPED_WORLD_DIR] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--backup-rotate BACKUP_ROOT KEEP] [--verify-world DIR_OR_IRW] [--check-config [FILE]] [--prepare-anvil-copy SOURCE NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end] [--dimension-root DIR]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--online-mode] [--survival] [--spawn-protection R] [--recover-level-dat STOPPED_WORLD_DIR] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--backup-rotate BACKUP_ROOT KEEP] [--verify-world DIR_OR_IRW] [--check-config [FILE]] [--prepare-anvil-copy SOURCE NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end] [--dimension-root DIR]");
                 println!(
                     "Offline usernames can be impersonated; --online-mode validates Mojang accounts and requires encrypted Protocol 5 login."
                 );
@@ -9545,6 +9637,16 @@ fn main() -> io::Result<()> {
                 if difficulty > 3 {
                     return Err(bad("difficulty must be 0..=3"));
                 }
+            }
+            "--spawn-protection" => {
+                spawn_protection = args
+                    .next()
+                    .ok_or_else(|| bad("missing --spawn-protection value"))?
+                    .parse::<i32>()
+                    .map_err(|_| {
+                        bad("invalid --spawn-protection (integer in 0..=65535; 0 disables)")
+                    })?
+                    .clamp(0, 65_535);
             }
             "--terrain-seed" => {
                 requested_seed = Some(
@@ -9955,6 +10057,10 @@ fn main() -> io::Result<()> {
         eprintln!(
             "server.properties: level-name={} (legacy IRW storage; Anvil is NOT enabled)",
             config.level_name
+        );
+        eprintln!(
+            "server.properties: spawn-protection={} (0 disables; automatically off while no operators are configured)",
+            config.spawn_protection
         );
     }
     if !bind.ip().is_loopback() && !insecure_offline_lan && !online_mode {
@@ -11392,6 +11498,7 @@ fn main() -> io::Result<()> {
                     hanging_path: hanging_file,
                     survival,
                     hardcore,
+                    spawn_protection,
                     difficulty: peer_difficulty,
                     game_rules: rules,
                     scoreboard: board,

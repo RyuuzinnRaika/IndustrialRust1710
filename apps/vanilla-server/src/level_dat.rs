@@ -16,6 +16,12 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
 }
 
+/// The level.dat default is the same vanilla `spawn-protection` default the
+/// server.properties parser uses, so the two can never drift apart.
+fn default_spawn_protection() -> i32 {
+    crate::server_config::DEFAULT_SPAWN_PROTECTION
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct LevelRoot {
     #[serde(rename = "Data")]
@@ -38,6 +44,14 @@ pub(crate) struct LevelData {
     pub spawn_y: i32,
     #[serde(rename = "SpawnZ")]
     pub spawn_z: i32,
+    /// Vanilla `Data.spawnProtection` (Int): the server.properties
+    /// `spawn-protection` radius persisted by the vanilla server at startup.
+    /// A level.dat written before this key existed (or by a third-party
+    /// tool) defaults to the vanilla 16; a negative value is normalized to
+    /// 0 (protection disabled) during parsing so the file stays loadable
+    /// and never re-serializes an out-of-range radius.
+    #[serde(rename = "spawnProtection", default = "default_spawn_protection")]
+    pub spawn_protection: i32,
     #[serde(rename = "Time")]
     pub time: i64,
     #[serde(rename = "DayTime", default, skip_serializing_if = "Option::is_none")]
@@ -85,6 +99,7 @@ impl LevelRoot {
             || self.data.game_type.is_some_and(|x| !(0..=2).contains(&x))
             || self.data.raining.is_some_and(|x| x != 0 && x != 1)
             || self.data.thundering.is_some_and(|x| x != 0 && x != 1)
+            || self.data.spawn_protection < 0
         {
             return Err(invalid("invalid 1.7.10 Anvil level.dat state"));
         }
@@ -99,8 +114,11 @@ pub(crate) fn parse_level(bytes: &[u8]) -> io::Result<LevelRoot> {
     }
     // Iterative nesting/length bound before fastnbt's recursive decoder.
     crate::legacy_nbt::bounded_nbt(bytes)?;
-    let root: LevelRoot =
+    let mut root: LevelRoot =
         fastnbt::from_bytes(bytes).map_err(|_| invalid("invalid level.dat NBT"))?;
+    // A hand-edited negative radius must not make the whole world unreadable
+    // and must never be re-serialized: normalize to 0 (protection disabled).
+    root.data.spawn_protection = root.data.spawn_protection.max(0);
     root.validate()?;
     Ok(root)
 }
@@ -246,6 +264,7 @@ mod tests {
                 spawn_x: -16,
                 spawn_y: 64,
                 spawn_z: 32,
+                spawn_protection: 24,
                 time: 24000,
                 day_time: Some(6000),
                 game_type: Some(0),
@@ -259,6 +278,61 @@ mod tests {
             },
             extra,
         }
+    }
+
+    /// #1318: `Data.spawnProtection` (Int) must survive decode -> encode ->
+    /// decode, an absent tag must take the vanilla default 16, and a
+    /// hand-edited negative value must normalize to 0 without failing the
+    /// whole file (vanilla treats a negative radius as disabled).
+    #[test]
+    fn spawn_protection_int_roundtrips_defaults_and_clamps_negative() {
+        let bytes = fastnbt::to_bytes(&sample()).unwrap();
+        let parsed = parse_level(&bytes).unwrap();
+        assert_eq!(parsed.data.spawn_protection, 24);
+        let again = parse_level(&fastnbt::to_bytes(&parsed).unwrap()).unwrap();
+        assert_eq!(again.data.spawn_protection, 24);
+        // The re-serialized document carries the tag back out as an Int.
+        let encoded: Value = fastnbt::from_bytes(&fastnbt::to_bytes(&parsed).unwrap()).unwrap();
+        let Value::Compound(top) = &encoded else {
+            panic!("level.dat root must be a compound");
+        };
+        let Value::Compound(data) = top.get("Data").expect("Data compound") else {
+            panic!("Data must be a compound");
+        };
+        assert_eq!(data.get("spawnProtection"), Some(&Value::Int(24)));
+
+        // Absent tag (older or third-party level.dat) -> default 16.
+        let mut mutable: Value = fastnbt::from_bytes(&bytes).unwrap();
+        {
+            let Value::Compound(top) = &mut mutable else {
+                panic!("level.dat root must be a compound");
+            };
+            let Value::Compound(data) = top.get_mut("Data").expect("Data compound") else {
+                panic!("Data must be a compound");
+            };
+            assert_eq!(data.remove("spawnProtection"), Some(Value::Int(24)));
+        }
+        let legacy = fastnbt::to_bytes(&mutable).unwrap();
+        assert_eq!(
+            parse_level(&legacy).unwrap().data.spawn_protection,
+            crate::server_config::DEFAULT_SPAWN_PROTECTION
+        );
+
+        // Negative radius -> 0 (disabled), and the normalized value is what
+        // a later save would write back.
+        {
+            let Value::Compound(top) = &mut mutable else {
+                panic!("level.dat root must be a compound");
+            };
+            let Value::Compound(data) = top.get_mut("Data").expect("Data compound") else {
+                panic!("Data must be a compound");
+            };
+            data.insert("spawnProtection".into(), Value::Int(-5));
+        }
+        let negative = fastnbt::to_bytes(&mutable).unwrap();
+        let clamped = parse_level(&negative).unwrap();
+        assert_eq!(clamped.data.spawn_protection, 0);
+        assert!(parse_level(&fastnbt::to_bytes(&clamped).unwrap()).is_ok());
     }
 
     #[test]
