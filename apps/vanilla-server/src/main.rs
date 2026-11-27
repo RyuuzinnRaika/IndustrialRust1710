@@ -7526,8 +7526,32 @@ fn play(
                             *inventory = staged;
                         }
                     }
-                    // Keep unused crafting ingredients saved rather than
-                    // deleting them when the player closes a crafting window.
+                    // The only nonzero window without a container is the
+                    // crafting table. Window zero is the personal 2x2 grid.
+                    if active_window == 0
+                        || (active_chest.is_none()
+                            && active_ender_chest.is_none()
+                            && active_furnace.is_none()
+                            && active_hopper.is_none()
+                            && active_device.is_none()
+                            && active_brewer.is_none()
+                            && active_anvil.is_none()
+                            && active_enchant.is_none())
+                    {
+                        // The multi-world ground ledger and pickup path
+                        // are shared. Leave the excess in the grid until
+                        // both can represent its owning dimension.
+                        let may_drop = dimension_worlds.is_none();
+                        close_crafting_inputs(
+                            inventory,
+                            inventory_path,
+                            may_drop.then_some((ground_items, ground_path, root_world_path)),
+                            location,
+                            active_window,
+                            |event| hub.broadcast(event),
+                        )?;
+                        hub.set_equipment(entity_id, inventory.equipment());
+                    }
                     active_window = 0;
                     active_chest = None;
                     active_ender_chest = None;
@@ -7815,6 +7839,59 @@ fn play(
         }
     }
 }
+/// Put as much as possible in the player inventory; stage any remaining
+/// ingredients and ground entities together. If no ground destination or
+/// capacity exists, keep the excess in its original persisted grid slots.
+fn close_crafting_inputs(
+    inventory: &mut Inventory,
+    inventory_path: &Path,
+    drop_target: Option<(&Mutex<GroundItems>, &Path, &Path)>,
+    location: (f64, f64, f64),
+    window: u8,
+    mut broadcast: impl FnMut(Event),
+) -> io::Result<()> {
+    let mut bag_only = inventory.clone();
+    let bag_changed = bag_only.return_crafting_inputs(window);
+    if let Some((ground_items, ground_path, world_path)) = drop_target {
+        let mut candidate = bag_only.clone();
+        let excess = candidate.take_remaining_crafting_inputs(window);
+        if !excess.is_empty() {
+            let mut ground = ground_items
+                .lock()
+                .map_err(|_| bad("ground item lock poisoned"))?;
+            if ground.has_capacity_for(excess.len()) {
+                let block = (
+                    (location.0.floor() as i32).clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
+                    (location.1.floor() as i32).clamp(0, 254),
+                    (location.2.floor() as i32).clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
+                );
+                let (next_ground, spawned) =
+                    ground.stage_put_many(&excess, block, DropSource::PlayerThrow)?;
+                journal::commit_inventory_to_ground(
+                    &world_path.with_extension("pending-txn.json"),
+                    &[
+                        (inventory_path, candidate.encoded()?),
+                        (ground_path, next_ground.encoded()?),
+                    ],
+                )?;
+                *inventory = candidate;
+                *ground = next_ground;
+                for item in spawned {
+                    for event in item.spawn() {
+                        broadcast(event);
+                    }
+                }
+                return Ok(());
+            }
+        }
+    }
+    if bag_changed {
+        bag_only.save(inventory_path)?;
+        *inventory = bag_only;
+    }
+    Ok(())
+}
+
 /// Commit both the debited inventory and all spawned death drops as one
 /// redo-journaled transaction. Until both snapshots are durable, neither
 /// state is visible to players.
