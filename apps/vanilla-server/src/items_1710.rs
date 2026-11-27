@@ -15,7 +15,7 @@ pub fn exists(id: i16) -> bool {
 /// buckets containing fluids, potion bottles and unique books are unstackable.
 pub fn max_count(id: i16) -> u8 {
     match id {
-        323 | 325 | 332 | 344 | 368 | 381 => 16,
+        323 | 325 | 332 | 344 | 368 | 387 => 16,
         256..=259
         | 261
         | 267..=279
@@ -30,16 +30,15 @@ pub fn max_count(id: i16) -> u8 {
         | 346
         | 354
         | 355
-        | 358
         | 359
         | 373
         | 386
-        | 387
         | 398
         | 403
         | 407
         | 408
         | 417..=419
+        | 422
         | 2256..=2267 => 1,
         _ => 64,
     }
@@ -148,15 +147,30 @@ mod tests {
 
     #[test]
     fn stack_limits_prevent_merging_unstackable_items() {
-        for id in [259, 261, 282, 310, 326, 355, 358, 373, 398, 403, 419, 2256] {
+        for id in [
+            259, 261, 282, 310, 326, 328, 343, 355, 359, 373, 398, 403, 419, 422, 2256,
+        ] {
             assert_eq!(max_count(id), 1, "must not stack: {id}");
             assert!(!valid_stack(id, 2, 0));
         }
-        for id in [323, 325, 332, 344, 368, 381] {
+        for id in [323, 325, 332, 344, 368] {
             assert_eq!(max_count(id), 16);
             assert!(valid_stack(id, 16, 0));
             assert!(!valid_stack(id, 17, 0));
         }
+        // Audit #1321 cross-check against minecraft-data 1.7 items.json:
+        // ender_eye (381) is a 64-stack (the old table capped it at 16),
+        // written_book (387) stacks to 16 (the old table capped it at 1),
+        // and filled_map (358) is a plain 64-stack (the old table capped
+        // it at 1). Command-block minecart (422) and every other cart stay 1.
+        assert_eq!(max_count(381), 64, "ender_eye must stack to 64");
+        assert!(valid_stack(381, 64, 0));
+        assert!(!valid_stack(381, 65, 0));
+        assert_eq!(max_count(368), 16, "ender_pearl stays 16");
+        assert_eq!(max_count(387), 16, "written_book stacks to 16");
+        assert!(!valid_stack(387, 17, 0));
+        assert_eq!(max_count(358), 64, "filled_map is not unstackable");
+        assert_eq!(max_count(422), 1);
         assert_eq!(max_count(264), 64);
         assert!(!valid_stack(264, 0, 0));
         assert!(!valid_stack(264, 65, 0));
