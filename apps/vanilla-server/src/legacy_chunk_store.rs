@@ -188,6 +188,10 @@ impl ReadOnlyChunkCache {
 }
 
 #[cfg(test)]
+#[path = "legacy_chunk_store/issue1150_tests.rs"]
+mod issue1150_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{anvil_export, world::World};
