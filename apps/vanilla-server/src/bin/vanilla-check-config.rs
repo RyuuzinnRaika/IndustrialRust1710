@@ -33,6 +33,10 @@ fn check(path: &Path) -> io::Result<()> {
         }
     );
     println!("Difficulty: {}", config.difficulty);
+    println!(
+        "Spawn protection radius: {} (0 disables; automatically off while no operators are configured)",
+        config.spawn_protection
+    );
     println!("Hardcore: {}", config.hardcore);
     println!("Online authentication: {}", config.online_mode);
     println!(

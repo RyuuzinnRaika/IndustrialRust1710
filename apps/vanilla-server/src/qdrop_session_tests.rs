@@ -233,6 +233,9 @@ fn context(root: &Path) -> ServerContext {
         hanging_path: Arc::new(root.join("hangings.json")),
         survival: true,
         hardcore: false,
+        // Production default; this store has no operators, so the square is
+        // automatically disabled (spawn protection is not under test here).
+        spawn_protection: server_config::DEFAULT_SPAWN_PROTECTION,
         difficulty: Arc::new(AtomicU8::new(1)),
         game_rules: Arc::new(Mutex::new(GameRules::default())),
         scoreboard: Arc::new(Mutex::new(Scoreboard::default())),

@@ -307,6 +307,12 @@ impl Administration {
     pub fn is_operator(&self, name: &str, verified_uuid: Option<&str>) -> io::Result<bool> {
         Ok(self.operator_level(name, verified_uuid)? > 0)
     }
+    /// True when the operators list holds at least one entry. Vanilla
+    /// automatically disables `spawn-protection` while no operators are
+    /// configured; the enforcement path in #1318 consults this.
+    pub fn has_operators(&self) -> io::Result<bool> {
+        Ok(!self.ops()?.is_empty())
+    }
     pub fn banned(&self, name: &str, address: IpAddr) -> io::Result<Option<String>> {
         self.banned_identity(name, None, address)
     }
@@ -563,7 +569,11 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         let store = Administration::new(root.clone()).unwrap();
+        // #1318: an empty ops list is the vanilla "no operators" state that
+        // auto-disables spawn protection; any entry flips it to configured.
+        assert!(!store.has_operators().unwrap());
         store.set_op("Operator", true).unwrap();
+        assert!(store.has_operators().unwrap());
         assert!(!store.is_operator("Operator", None).unwrap());
         assert!(!store
             .is_operator("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca"))

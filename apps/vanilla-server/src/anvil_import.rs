@@ -341,6 +341,7 @@ mod tests {
                 spawn_x: 0,
                 spawn_y: 64,
                 spawn_z: 0,
+                spawn_protection: crate::server_config::DEFAULT_SPAWN_PROTECTION,
                 time: 0,
                 day_time: None,
                 game_type: None,
