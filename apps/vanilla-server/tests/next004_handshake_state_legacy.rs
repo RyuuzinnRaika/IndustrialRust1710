@@ -13,6 +13,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ACCOUNT: &str = "Next004Tester";
+const PORT_ZERO_ACCOUNT: &str = "Next004PortZero";
+const PORT_MAX_ACCOUNT: &str = "Next004PortMax";
+const POST_LEGACY_ACCOUNT: &str = "Next004PostPing";
 
 struct TestServer {
     child: Child,
@@ -47,7 +50,16 @@ impl TestServer {
         fs::create_dir(&root).expect("create disposable test directory");
         fs::write(
             root.join("whitelist.json"),
-            format!(r#"[{{"name":"{ACCOUNT}"}}]"#),
+            serde_json::to_vec(
+                &[
+                    ACCOUNT,
+                    PORT_ZERO_ACCOUNT,
+                    PORT_MAX_ACCOUNT,
+                    POST_LEGACY_ACCOUNT,
+                ]
+                .map(|name| serde_json::json!({ "name": name })),
+            )
+            .expect("serialize isolated whitelist"),
         )
         .expect("write isolated whitelist");
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("choose loopback port");
@@ -175,28 +187,33 @@ fn expect_silent_close(mut socket: TcpStream, label: &str) {
 }
 
 /// Complete a genuine whitelisted login and require Login Success (0x02).
-fn expect_login_success(port: u16, advertised_port: u16, label: &str) {
+fn expect_login_success(port: u16, advertised_port: u16, name: &str, label: &str) {
     let mut socket = connect(port, Duration::from_secs(8));
     transmit(
         &mut socket,
         0,
         &handshake_body(5, "localhost", advertised_port, &[0x02]),
     );
-    transmit(&mut socket, 0, &login_start(ACCOUNT));
+    transmit(&mut socket, 0, &login_start(name));
     let frame =
         read_frame(&mut socket).unwrap_or_else(|err| panic!("{label}: no login response: {err}"));
     let mut response = Cursor::new(&frame);
+    let packet_id = response.read_varint().unwrap();
+    let disconnect_reason = if packet_id == 0 {
+        response.read_string(32_768).ok()
+    } else {
+        None
+    };
     assert_eq!(
-        response.read_varint().unwrap(),
-        2,
-        "{label}: expected Login Success, never Disconnect or Play"
+        packet_id, 2,
+        "{label}: expected Login Success, never Disconnect or Play; disconnect: {disconnect_reason:?}"
     );
     assert_eq!(
         response.read_string(40).unwrap().len(),
         36,
         "{label}: Login Success must carry a UUID"
     );
-    assert_eq!(response.read_string(16).unwrap(), ACCOUNT);
+    assert_eq!(response.read_string(16).unwrap(), name);
     response.finish().unwrap();
     let _ = socket.shutdown(Shutdown::Write);
 }
@@ -227,7 +244,7 @@ fn next004_unknown_next_state_never_reaches_play() {
         expect_silent_close(socket, label);
     }
     // A rejected state must not poison later admissions.
-    expect_login_success(server.port, server.port, "login after bad states");
+    expect_login_success(server.port, server.port, ACCOUNT, "login after bad states");
     server.stop();
 }
 
@@ -237,8 +254,20 @@ fn next004_abnormal_ports_and_legacy_ping_are_fail_closed() {
 
     // Advertised ports are informational: 0 and 65535 must neither block a
     // genuine login nor route anything into Play by themselves.
-    expect_login_success(server.port, 0, "login via advertised port 0");
-    expect_login_success(server.port, 65535, "login via advertised port 65535");
+    // Login Success precedes session teardown. Use distinct whitelisted
+    // identities so the duplicate-login guard cannot mask port handling.
+    expect_login_success(
+        server.port,
+        0,
+        PORT_ZERO_ACCOUNT,
+        "login via advertised port 0",
+    );
+    expect_login_success(
+        server.port,
+        65535,
+        PORT_MAX_ACCOUNT,
+        "login via advertised port 65535",
+    );
 
     // Status state works with an advertised port that never matches bind.
     let mut status_socket = connect(server.port, Duration::from_secs(5));
@@ -276,6 +305,11 @@ fn next004_abnormal_ports_and_legacy_ping_are_fail_closed() {
     expect_silent_close(legacy_raw, "unframed legacy ping 0xFE");
 
     // The server itself stays fully functional for honest clients.
-    expect_login_success(server.port, server.port, "login after legacy ping traffic");
+    expect_login_success(
+        server.port,
+        server.port,
+        POST_LEGACY_ACCOUNT,
+        "login after legacy ping traffic",
+    );
     server.stop();
 }
