@@ -321,7 +321,7 @@ fn teleport(client: &mut BufferedClient, server: &mut Server, name: &str, target
 }
 
 /// Wait until the client echoes a window-0 dump containing the flat entry.
-fn wait_for_entry(client: &mut BufferedClient, entry: [u8; 6], context: &str) {
+fn wait_for_entry(client: &mut BufferedClient, entry: [u8; 7], context: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         assert!(Instant::now() < deadline, "{context}: timed out");
@@ -334,7 +334,7 @@ fn wait_for_entry(client: &mut BufferedClient, entry: [u8; 6], context: &str) {
         if id == 0x40 {
             panic!("{context}: disconnected: {body:?}");
         }
-        if id == 0x30 && body.windows(6).any(|w| w == entry) {
+        if id == 0x30 && body.windows(7).any(|w| w == entry) {
             return;
         }
     }
@@ -350,7 +350,7 @@ fn place(client: &mut BufferedClient, wall: (i32, i32, i32), face: i8, item: i16
     body.extend_from_slice(&item.to_be_bytes());
     body.push(1);
     body.extend_from_slice(&0i16.to_be_bytes());
-    body.push(0); // no NBT: single TAG_End byte
+    body.extend_from_slice(&(-1i16).to_be_bytes());
     body.extend_from_slice(&[0, 0, 0]);
     client.write_all(&packet(8, &body)).unwrap();
 }
@@ -389,7 +389,7 @@ fn next039_frame_break_drops_the_frame_and_its_contents_exactly_once() {
     // into the now-empty held slot.
     server.console("/give Breaker 389 1");
     // 389 = 0x0185: window-0 entry [item][count][dmg][nbt -1].
-    wait_for_entry(&mut breaker, [1, 133, 1, 0, 0, 0], "frame delivered");
+    wait_for_entry(&mut breaker, [1, 133, 1, 0, 0, 255, 255], "frame delivered");
     teleport(&mut breaker, &mut server, "Breaker", [0.5, 64.0, 0.5]);
     teleport(&mut watcher, &mut server, "Watcher", [8.5, 64.0, 8.5]);
 
@@ -441,7 +441,7 @@ fn next039_frame_break_drops_the_frame_and_its_contents_exactly_once() {
     // the observer sees the frame metadata carry the displayed item.
     server.console("/give Breaker 351 3");
     // 351 = 0x015F.
-    wait_for_entry(&mut breaker, [1, 95, 3, 0, 0, 0], "ink delivered");
+    wait_for_entry(&mut breaker, [1, 95, 3, 0, 0, 255, 255], "ink delivered");
     use_entity(&mut breaker, frame_id, 0);
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {

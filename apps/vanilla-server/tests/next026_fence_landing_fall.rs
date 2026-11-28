@@ -261,12 +261,12 @@ fn give(client: &mut BufferedClient, id: i16) {
     give_packet.extend_from_slice(&id.to_be_bytes());
     give_packet.push(1);
     give_packet.extend_from_slice(&0i16.to_be_bytes());
-    give_packet.push(0); // no NBT: single TAG_End byte
+    give_packet.extend_from_slice(&(-1i16).to_be_bytes());
     client.write_all(&packet(0x10, &give_packet)).unwrap();
     wait_for(
         client,
         0x2f,
-        |body| body.len() == 9 && body[3..5] == id.to_be_bytes(),
+        |body| body.len() == 10 && body[3..5] == id.to_be_bytes(),
         "slot echo",
     );
 }
@@ -281,7 +281,7 @@ fn place(client: &mut BufferedClient, x: i32, item: i16, y: u8, landed: u8, bloc
     place_packet.extend_from_slice(&item.to_be_bytes());
     place_packet.push(1);
     place_packet.extend_from_slice(&0i16.to_be_bytes());
-    place_packet.push(0); // no NBT: single TAG_End byte
+    place_packet.extend_from_slice(&(-1i16).to_be_bytes());
     place_packet.extend_from_slice(&[8, 8, 8]);
     client.write_all(&packet(8, &place_packet)).unwrap();
     wait_for(

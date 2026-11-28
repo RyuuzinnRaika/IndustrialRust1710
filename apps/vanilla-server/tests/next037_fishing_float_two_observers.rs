@@ -371,7 +371,7 @@ fn use_rod(client: &mut BufferedClient, damage: i16) {
     body.extend_from_slice(&346i16.to_be_bytes());
     body.push(1);
     body.extend_from_slice(&damage.to_be_bytes());
-    body.push(0); // no NBT: single TAG_End byte
+    body.extend_from_slice(&(-1i16).to_be_bytes());
     body.extend_from_slice(&[0, 0, 0]);
     client.write_all(&packet(8, &body)).unwrap();
 }
@@ -392,8 +392,8 @@ fn observe_rod_damage(client: &mut BufferedClient) -> i16 {
             panic!("rod echo: disconnected: {body:?}");
         }
         if packet_id == 0x30 {
-            for w in body.windows(6) {
-                if w[0..2] == [1, 90] && w[2] == 1 && w[5] == 0 {
+            for w in body.windows(7) {
+                if w[0..2] == [1, 90] && w[2] == 1 && w[5..7] == [255, 255] {
                     return i16::from_be_bytes([w[3], w[4]]);
                 }
             }
@@ -432,7 +432,7 @@ fn next037_fishing_float_appears_once_and_disappears_once_for_both_watchers() {
         &mut angler,
         0x30,
         // 346 = 0x015A: entry [item][count][dmg][nbt -1].
-        |body| body.windows(6).any(|w| w == [1, 90, 1, 0, 0, 0]),
+        |body| body.windows(7).any(|w| w == [1, 90, 1, 0, 0, 255, 255]),
         "rod delivered",
     );
     teleport(&mut angler, &mut server, "Angler", [4.5, 64.0, 0.5]);

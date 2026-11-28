@@ -277,7 +277,7 @@ impl Client {
         body.extend_from_slice(&item.to_be_bytes());
         body.push(1);
         body.extend_from_slice(&0i16.to_be_bytes());
-        body.push(0); // no NBT: single TAG_End byte
+        body.extend_from_slice(&(-1i16).to_be_bytes());
         self.send(0x10, &body);
         let slot_bytes = slot.to_be_bytes();
         self.until(0x2f, |p| {
@@ -293,7 +293,7 @@ impl Client {
         body.extend_from_slice(&held.to_be_bytes());
         body.push(1);
         body.extend_from_slice(&0i16.to_be_bytes());
-        body.push(0); // no NBT: single TAG_End byte
+        body.extend_from_slice(&(-1i16).to_be_bytes());
         body.extend_from_slice(&[8, 8, 8]);
         self.send(0x08, &body);
     }

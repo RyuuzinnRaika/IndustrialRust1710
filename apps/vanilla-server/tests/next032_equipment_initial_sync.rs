@@ -254,7 +254,7 @@ fn give(client: &mut BufferedClient, slot: i16, id: i16, count: u8) {
     give_packet.extend_from_slice(&id.to_be_bytes());
     give_packet.push(count);
     give_packet.extend_from_slice(&0i16.to_be_bytes());
-    give_packet.push(0); // no NBT: single TAG_End byte
+    give_packet.extend_from_slice(&(-1i16).to_be_bytes());
     client.write_all(&packet(0x10, &give_packet)).unwrap();
     wait_for(
         client,

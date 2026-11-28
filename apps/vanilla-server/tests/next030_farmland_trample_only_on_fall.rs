@@ -274,12 +274,12 @@ fn give(client: &mut BufferedClient, id: i16, count: u8, damage: i16) {
     give_packet.extend_from_slice(&id.to_be_bytes());
     give_packet.push(count);
     give_packet.extend_from_slice(&damage.to_be_bytes());
-    give_packet.push(0); // no NBT: single TAG_End byte
+    give_packet.extend_from_slice(&(-1i16).to_be_bytes());
     client.write_all(&packet(0x10, &give_packet)).unwrap();
     wait_for(
         client,
         0x2f,
-        |body| body.len() == 9 && body[3..5] == id.to_be_bytes(),
+        |body| body.len() == 10 && body[3..5] == id.to_be_bytes(),
         "slot echo",
     );
 }
@@ -302,7 +302,7 @@ fn place_and_wait(
     place.extend_from_slice(&item.to_be_bytes());
     place.push(1);
     place.extend_from_slice(&damage.to_be_bytes());
-    place.push(0); // no NBT: single TAG_End byte
+    place.extend_from_slice(&(-1i16).to_be_bytes());
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&packet(8, &place)).unwrap();
     wait_for(

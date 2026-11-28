@@ -208,7 +208,7 @@ fn place_cobble(x: i32, y: u8, z: i32, face: i8) -> Vec<u8> {
     p.extend_from_slice(&4i16.to_be_bytes()); // item id (slot Short)
     p.push(1); // count
     p.extend_from_slice(&0i16.to_be_bytes()); // damage
-    p.push(0); // TAG_End: no NBT (vanilla self-delimiting Slot tail)
+    p.extend_from_slice(&(-1i16).to_be_bytes()); // no NBT
     p.extend_from_slice(&[8, 8, 8]); // cursor
     frame(8, &p)
 }

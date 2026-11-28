@@ -320,7 +320,7 @@ fn creative_set(client: &mut Client, slot: i16, id: i16, count: u8) {
     p.extend_from_slice(&id.to_be_bytes());
     p.push(count);
     p.extend_from_slice(&0i16.to_be_bytes());
-    p.push(0); // no NBT: single TAG_End byte
+    p.extend_from_slice(&(-1i16).to_be_bytes());
     client.send(&frame(0x10, &p));
     let want = [0u8, (slot >> 8) as u8, slot as u8];
     client
@@ -340,7 +340,7 @@ fn use_block(client: &mut Client, x: i32, y: u8, z: i32, item: Option<(i16, u8)>
             p.extend_from_slice(&id.to_be_bytes());
             p.push(count);
             p.extend_from_slice(&0i16.to_be_bytes());
-            p.push(0); // no NBT: single TAG_End byte
+            p.extend_from_slice(&(-1i16).to_be_bytes());
         }
         None => p.extend_from_slice(&(-1i16).to_be_bytes()),
     }
@@ -355,7 +355,7 @@ fn click(client: &mut Client, window: u8, slot: i16, action: i16) -> Vec<u8> {
     p.push(0); // left button
     p.extend_from_slice(&action.to_be_bytes());
     p.push(0); // mode: normal click
-    p.extend_from_slice(&(-1i16).to_be_bytes()); // empty slot claim stays Short -1
+    p.extend_from_slice(&(-1i16).to_be_bytes());
     client.send(&frame(0x0e, &p));
     let want = [window, action.to_be_bytes()[0], action.to_be_bytes()[1], 1];
     client
@@ -392,10 +392,14 @@ fn parse_window_slots(payload: &[u8]) -> Vec<(i16, u8)> {
         }
         let n = payload[at];
         at += 3; // count + damage
-        if at >= payload.len() || payload[at] != 0 {
+        if at + 2 > payload.len() {
             break;
         }
-        at += 1;
+        let nbt = i16::from_be_bytes([payload[at], payload[at + 1]]);
+        at += 2;
+        if nbt > 0 {
+            at += nbt as usize;
+        }
         slots.push((id, n));
     }
     slots

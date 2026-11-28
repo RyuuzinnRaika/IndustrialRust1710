@@ -3,10 +3,11 @@
 //! The item and record are journaled together on edit/sign. Anvil export of
 //! these records is not implemented.
 use crate::inventory::{Inventory, Stack};
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -134,11 +135,9 @@ pub fn initialize(world_path: &Path) -> io::Result<()> {
         .map_err(|_| invalid("books initialized more than once"))
 }
 
-/// Create a wire-format NBT body for a book: uncompressed, self-delimiting
-/// NBT, exactly as the vanilla Slot tail carries it. Return None for blank
-/// books and corrupt/orphaned references; those are never populated from a
-/// client packet. Callers embed the bytes directly, or a single TAG_End
-/// byte when this returns None.
+/// Create a wire-format NBT body for a book. Return None for blank books and
+/// corrupt/orphaned references; those are never populated from a client packet.
+/// Caller writes the short length and the bytes.
 pub fn wire_nbt(stack: Stack) -> Option<Vec<u8>> {
     if !matches!(stack.id, 386 | 387) || stack.damage <= 0 {
         return None;
@@ -149,18 +148,26 @@ pub fn wire_nbt(stack: Stack) -> Option<Vec<u8>> {
     if record.signed != (stack.id == 387) {
         return None;
     }
-    let raw = fastnbt::to_bytes(&record.book).ok()?;
+    compressed_nbt(&record.book).ok()
+}
+fn compressed_nbt(book: &Book) -> io::Result<Vec<u8>> {
+    let raw = fastnbt::to_bytes(book).map_err(|_| invalid("serialize book NBT"))?;
     if raw.len() as u64 > MAX_NBT {
-        return None;
+        return Err(invalid("book NBT exceeds limit"));
     }
-    Some(raw)
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&raw)?;
+    let bytes = encoder.finish()?;
+    if bytes.len() > i16::MAX as usize {
+        return Err(invalid("book compressed NBT too large"));
+    }
+    Ok(bytes)
 }
 
-/// Decode MC|BEdit / MC|BSign payload: Slot (ID, count, damage, then the
-/// vanilla self-delimiting uncompressed NBT tail). Never copy
-/// client-supplied author into signed books.
+/// Decode MC|BEdit / MC|BSign payload: Slot (ID, count, damage, Short-length
+/// compressed NBT). Never copy client-supplied author into signed books.
 fn incoming(payload: &[u8], signing: bool) -> io::Result<(i16, Book)> {
-    if payload.len() < 6 {
+    if payload.len() < 7 {
         return Err(invalid("short book slot"));
     }
     let id = i16::from_be_bytes([payload[0], payload[1]]);
@@ -168,22 +175,19 @@ fn incoming(payload: &[u8], signing: bool) -> io::Result<(i16, Book)> {
         return Err(invalid("unexpected book slot"));
     }
     let damage = i16::from_be_bytes([payload[3], payload[4]]);
-    if damage < 0 {
-        return Err(invalid("negative book damage"));
+    let length = i16::from_be_bytes([payload[5], payload[6]]);
+    if damage < 0 || length <= 0 || length as usize != payload.len() - 7 {
+        return Err(invalid("bad book NBT length"));
     }
-    // The envelope walk validates nesting and lengths *before* fastnbt's
-    // recursive decoder, and pins the structure to the exact payload end:
-    // a book packet carries one Slot and nothing else.
-    let raw = &payload[5..];
+    let decoder = GzDecoder::new(&payload[7..]);
+    let mut raw = Vec::new();
+    decoder.take(MAX_NBT + 1).read_to_end(&mut raw)?;
     if raw.len() as u64 > MAX_NBT {
-        return Err(invalid("book NBT too large"));
+        return Err(invalid("book NBT inflated too large"));
     }
-    let end =
-        crate::item_nbt::scan_nbt_wire(raw).map_err(|_| invalid("invalid book NBT envelope"))?;
-    if end != raw.len() {
-        return Err(invalid("trailing book slot bytes"));
-    }
-    let book: Book = fastnbt::from_bytes(raw).map_err(|_| invalid("invalid book NBT"))?;
+    // Iterative nesting/length bound before fastnbt's recursive decoder.
+    crate::legacy_nbt::bounded_nbt(&raw)?;
+    let book: Book = fastnbt::from_bytes(&raw).map_err(|_| invalid("invalid book NBT"))?;
     // The client can include an author field when signing, but authority is
     // solely the authenticated session name (in offline mode, not verified).
     if book.pages.is_empty()
@@ -308,32 +312,26 @@ mod tests {
         assert!(!b.valid(true));
     }
     #[test]
-    fn vanilla_raw_book_nbt_roundtrips_and_the_old_dialect_is_rejected() {
+    fn compressed_book_nbt_is_a_valid_legacy_compound() {
         let b = Book {
             pages: vec!["hello".into(), "world".into()],
             title: None,
             author: None,
         };
-        let raw = fastnbt::to_bytes(&b).unwrap();
+        let bytes = compressed_nbt(&b).unwrap();
+        let mut raw = Vec::new();
+        GzDecoder::new(bytes.as_slice())
+            .read_to_end(&mut raw)
+            .unwrap();
         assert_eq!(fastnbt::from_bytes::<Book>(&raw).unwrap(), b);
         let mut payload = vec![];
         payload.extend_from_slice(&386i16.to_be_bytes());
         payload.push(1);
         payload.extend_from_slice(&0i16.to_be_bytes());
-        payload.extend_from_slice(&raw);
+        payload.extend_from_slice(&(bytes.len() as i16).to_be_bytes());
+        payload.extend_from_slice(&bytes);
         assert_eq!(incoming(&payload, false).unwrap().1, b);
         assert!(incoming(&payload, true).is_err());
-        // The removed short-length + gzip dialect must never parse: a real
-        // 1.7.10 client sends the self-delimiting envelope only.
-        let mut legacy = Vec::from(&payload[..5]);
-        legacy.extend_from_slice(&(raw.len() as i16).to_be_bytes());
-        legacy.extend_from_slice(&raw);
-        assert!(incoming(&legacy, false).is_err());
-        // Truncated envelopes and trailing bytes after the structure fail.
-        assert!(incoming(&payload[..payload.len() - 1], false).is_err());
-        let mut trailing = payload;
-        trailing.push(0);
-        assert!(incoming(&trailing, false).is_err());
     }
     #[test]
     fn edit_sign_and_reconnect_restore_book_nbt() {
@@ -359,12 +357,13 @@ mod tests {
         writable.extend_from_slice(&386i16.to_be_bytes());
         writable.push(1);
         writable.extend_from_slice(&0i16.to_be_bytes());
-        let data = fastnbt::to_bytes(&Book {
+        let data = compressed_nbt(&Book {
             pages: vec!["First page".to_owned()],
             title: None,
             author: None,
         })
         .unwrap();
+        writable.extend_from_slice(&(data.len() as i16).to_be_bytes());
         writable.extend_from_slice(&data);
         assert!(process(
             "MC|BEdit",
@@ -383,7 +382,7 @@ mod tests {
             Some(edited)
         );
 
-        let signed_nbt = fastnbt::to_bytes(&Book {
+        let signed_nbt = compressed_nbt(&Book {
             pages: vec!["First page".to_owned()],
             title: Some("A title".to_owned()),
             author: Some("Spoofed".to_owned()),
@@ -393,6 +392,7 @@ mod tests {
         signing.extend_from_slice(&387i16.to_be_bytes());
         signing.push(1);
         signing.extend_from_slice(&edited.damage.to_be_bytes());
+        signing.extend_from_slice(&(signed_nbt.len() as i16).to_be_bytes());
         signing.extend_from_slice(&signed_nbt);
         assert!(process(
             "MC|BSign",
@@ -468,8 +468,12 @@ mod tests {
         assert!(loaded.books[&1].signed);
         assert!(!loaded.books[&2].signed);
 
-        let packed = fastnbt::to_bytes(&loaded.books[&1].book).unwrap();
-        assert_eq!(fastnbt::from_bytes::<Book>(&packed).unwrap(), signed);
+        let packed = compressed_nbt(&loaded.books[&1].book).unwrap();
+        let mut raw = Vec::new();
+        GzDecoder::new(packed.as_slice())
+            .read_to_end(&mut raw)
+            .unwrap();
+        assert_eq!(fastnbt::from_bytes::<Book>(&raw).unwrap(), signed);
 
         let signed_stack = Stack {
             id: 387,

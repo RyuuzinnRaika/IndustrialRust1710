@@ -364,7 +364,7 @@ fn place_painting(client: &mut BufferedClient, wall: (i32, i32, i32), face: i8) 
     body.extend_from_slice(&321i16.to_be_bytes());
     body.push(1);
     body.extend_from_slice(&0i16.to_be_bytes());
-    body.push(0); // no NBT: single TAG_End byte
+    body.extend_from_slice(&(-1i16).to_be_bytes());
     body.extend_from_slice(&[0, 0, 0]);
     client.write_all(&packet(8, &body)).unwrap();
 }
@@ -407,7 +407,7 @@ fn next038_painting_packets_anchor_the_wall_for_both_placing_and_joining_clients
             if id == 0x00 && body.len() == 4 {
                 painter.write_all(&packet(0, &body)).unwrap();
             }
-            if id == 0x30 && body.windows(6).any(|w| w == [1, 65, 1, 0, 0, 0]) {
+            if id == 0x30 && body.windows(7).any(|w| w == [1, 65, 1, 0, 0, 255, 255]) {
                 break;
             }
         }

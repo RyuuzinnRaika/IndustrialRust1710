@@ -279,7 +279,7 @@ fn use_block(client: &mut Client, x: i32, y: u8, z: i32, item: Option<(i16, u8)>
             p.extend_from_slice(&id.to_be_bytes());
             p.push(count);
             p.extend_from_slice(&0i16.to_be_bytes());
-            p.push(0); // no NBT: single TAG_End byte
+            p.extend_from_slice(&(-1i16).to_be_bytes());
         }
         None => p.extend_from_slice(&(-1i16).to_be_bytes()),
     }

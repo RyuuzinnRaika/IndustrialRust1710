@@ -370,7 +370,7 @@ fn use_held_bow(client: &mut BufferedClient) {
     body.extend_from_slice(&261i16.to_be_bytes()); // claimed item must equal held
     body.push(1); // count
     body.extend_from_slice(&0i16.to_be_bytes()); // damage
-    body.push(0); // no NBT: single TAG_End byte // no NBT
+    body.extend_from_slice(&(-1i16).to_be_bytes()); // no NBT
     body.extend_from_slice(&[0, 0, 0]); // cursor x/y/z
     client.write_all(&packet(8, &body)).unwrap();
 }
@@ -426,7 +426,7 @@ fn next036_arrow_damages_and_keeps_owner_after_shooter_logout() {
         0x30,
         |body| {
             // 261 encodes as i16 [0x01,0x05]: entry [item][count][dmg][nbt -1].
-            body.windows(6).any(|w| w == [1, 5, 1, 0, 0, 0])
+            body.windows(7).any(|w| w == [1, 5, 1, 0, 0, 255, 255])
         },
         "bow delivered",
     );
@@ -435,7 +435,7 @@ fn next036_arrow_damages_and_keeps_owner_after_shooter_logout() {
         &mut archer,
         0x30,
         |body| {
-            body.windows(6).any(|w| w == [1, 6, 5, 0, 0, 0]) // 262 x5
+            body.windows(7).any(|w| w == [1, 6, 5, 0, 0, 255, 255]) // 262 x5
         },
         "arrows delivered",
     );
