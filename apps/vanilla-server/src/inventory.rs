@@ -2153,6 +2153,51 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn protocol5_slot_matches_mojang_1710_codec() {
+        // The original 1.7.10 client and server use the same PacketBuffer
+        // encoding: absent tag = signed short -1; present tag = signed
+        // short byte length + gzip. Do not substitute the 1.8 encoding.
+        // NBT field below was emitted by et.a(dh) from the official
+        // launcher server JAR SHA-1 952438ac4e01b4d115c5fc38f891710c4941df29
+        // for {display:{Name:"Audit"}}. Item header is paper x1, damage 0.
+        let name_field = [
+            0x00, 0x31, 0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xe3, 0x62,
+            0x60, 0xe0, 0x62, 0x60, 0x4f, 0xc9, 0x2c, 0x2e, 0xc8, 0x49, 0xac, 0xe4, 0x60, 0x60,
+            0xf1, 0x4b, 0xcc, 0x4d, 0x65, 0x60, 0x75, 0x2c, 0x4d, 0xc9, 0x2c, 0x61, 0x60, 0x00,
+            0x00, 0xbd, 0x45, 0x40, 0x59, 0x1d, 0x00, 0x00, 0x00,
+        ];
+        let tagged = [[0x01, 0x53, 1, 0, 0].as_slice(), &name_field].concat();
+
+        for (bytes, expected_id, tagged) in [
+            (&[0xff, 0xff][..], None, false),
+            (&[0, 1, 64, 0, 0, 0xff, 0xff][..], Some(1), false),
+            (tagged.as_slice(), Some(339), true),
+        ] {
+            // A following field must not be consumed as part of the slot.
+            let payload = [bytes, &[0x42]].concat();
+            let mut input = crate::Input(&payload);
+            let item = input.slot().unwrap();
+            assert_eq!(item.map(|stack| stack.id), expected_id);
+            assert_eq!(input.u8().unwrap(), 0x42);
+            input.finish().unwrap();
+
+            let mut encoded = Vec::new();
+            Inventory::encode_slot(&mut encoded, item);
+            assert_eq!(encoded, bytes);
+            if tagged {
+                let value = crate::item_nbt::value(item.unwrap().nbt.unwrap()).unwrap();
+                let fastnbt::Value::Compound(root) = value else {
+                    panic!("expected named compound");
+                };
+                let fastnbt::Value::Compound(display) = &root["display"] else {
+                    panic!("expected display compound");
+                };
+                assert_eq!(display["Name"], fastnbt::Value::String("Audit".into()));
+            }
+        }
+    }
+
     /// REG-132 / #768: a Protocol 5 double-click must neither overflow
     /// a stack nor accept a forged slot outside the active player window.
     #[test]
