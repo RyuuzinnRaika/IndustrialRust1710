@@ -223,15 +223,19 @@ fn item_spawn_id(body: &[u8]) -> Option<i32> {
 }
 
 /// Item-slot metadata (0x1C): [id i32][0xAA][item i16][count u8]
-/// [damage i16][TAG_End 0x00][0x7F] for an NBT-less stack.
+/// [damage i16][nbt -1 i16][0x7F] for an NBT-less stack.
 fn item_count_update(body: &[u8]) -> Option<(i32, i16, u8)> {
-    (body.len() == 12 && body[4] == 0xaa && body[10] == 0 && body[11] == 0x7f).then(|| {
-        (
-            i32::from_be_bytes(body[..4].try_into().unwrap()),
-            i16::from_be_bytes(body[5..7].try_into().unwrap()),
-            body[7],
-        )
-    })
+    (body.len() == 13
+        && body[4] == 0xaa
+        && body[10..12] == (-1i16).to_be_bytes()
+        && body[12] == 0x7f)
+        .then(|| {
+            (
+                i32::from_be_bytes(body[..4].try_into().unwrap()),
+                i16::from_be_bytes(body[5..7].try_into().unwrap()),
+                body[7],
+            )
+        })
 }
 
 /// Destroy Entities (0x13) with a single entity.
@@ -341,8 +345,13 @@ fn next035_merge_destroy_and_count_converge_on_every_observer() {
             0x00 if body.len() == 4 => owner.write_all(&packet(0, &body)).unwrap(),
             // 0x30 dumps slots without indices: an occupied stack is
             // [item i16][count u8][damage i16][nbt -1 i16].
-            0x30 if body.windows(6).any(|w| w == [0, DIRT as u8, 12, 0, 0, 0]) => got_stack = true,
-            0x2f if body.len() == 9 && body[3..5] == DIRT.to_be_bytes() && body[5] == 12 => {
+            0x30 if body
+                .windows(7)
+                .any(|w| w == [0, DIRT as u8, 12, 0, 0, 255, 255]) =>
+            {
+                got_stack = true
+            }
+            0x2f if body.len() == 10 && body[3..5] == DIRT.to_be_bytes() && body[5] == 12 => {
                 got_stack = true
             }
             0x40 => panic!("owner disconnected: {body:?}"),

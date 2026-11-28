@@ -199,26 +199,25 @@ fn nbt_tag_compound_minimal_fixture_roundtrips_without_guessing_bytes() {
 #[test]
 fn inventory_window_fixtures_preserve_protocol5_slot_and_frame_layout() {
     // Clientbound S2F: window 0, hotbar index 36, cobblestone x64,
-    // damage 2, no NBT (vanilla self-delimiting tail: TAG_End byte 0x00).
-    // Packet length is an exact one-byte VarInt.
-    const SET_SLOT: &[u8] = &[10, 0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 0];
+    // damage 2, NBT=-1. Packet length is an exact one-byte VarInt.
+    const SET_SLOT: &[u8] = &[11, 0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 255, 255];
     let mut set_slot = SET_SLOT;
     assert_eq!(
         read_frame(&mut set_slot).unwrap(),
-        [0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 0]
+        [0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 255, 255]
     );
     // S30: window 0, two entries: empty and 1 x stone, no NBT.
-    const WINDOW_ITEMS: &[u8] = &[12, 0x30, 0, 0, 2, 255, 255, 0, 1, 32, 0, 0, 0];
+    const WINDOW_ITEMS: &[u8] = &[13, 0x30, 0, 0, 2, 255, 255, 0, 1, 32, 0, 0, 255, 255];
     let mut packet = WINDOW_ITEMS;
     let raw = read_frame(&mut packet).unwrap();
     assert_eq!(raw[0], 0x30);
     assert_eq!(u16::from_be_bytes([raw[2], raw[3]]), 2);
-    assert_eq!(&raw[4..], &[255, 255, 0, 1, 32, 0, 0, 0]);
+    assert_eq!(&raw[4..], &[255, 255, 0, 1, 32, 0, 0, 255, 255]);
 }
 
 #[test]
 fn all_two_part_fragment_boundaries_preserve_inventory_packets() {
-    let payload = [0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 0];
+    let payload = [0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 255, 255];
     let mut framed = Vec::new();
     write_frame(&mut framed, &payload).unwrap();
     for split in 1..framed.len() {

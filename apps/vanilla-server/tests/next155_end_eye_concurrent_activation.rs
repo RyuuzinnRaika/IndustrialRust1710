@@ -334,7 +334,7 @@ fn creative_set(client: &mut BufferedClient, slot: i16, item: i16, count: u8) {
     body.extend_from_slice(&item.to_be_bytes());
     body.push(count);
     body.extend_from_slice(&0i16.to_be_bytes());
-    body.push(0); // TAG_End: no NBT (vanilla self-delimiting Slot tail)
+    body.extend_from_slice(&(-1i16).to_be_bytes());
     client.write_all(&packet(0x10, &body)).unwrap();
     let want = slot.to_be_bytes();
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -368,7 +368,7 @@ fn right_click(client: &mut BufferedClient, target: (i32, u8, i32), face: u8, it
     body.extend_from_slice(&item.to_be_bytes());
     body.push(1);
     body.extend_from_slice(&0i16.to_be_bytes());
-    body.push(0); // TAG_End: no NBT (vanilla self-delimiting Slot tail)
+    body.extend_from_slice(&(-1i16).to_be_bytes());
     body.extend_from_slice(&[8, 8, 8]);
     client.write_all(&packet(8, &body)).unwrap();
 }
@@ -389,11 +389,9 @@ fn block_change(body: &[u8]) -> Option<(i32, u8, i32, u8, u8)> {
 
 /// Slot 36 of a window-0 0x30 dump. Outer `None` means "not a window-0
 /// dump"; `Some(None)` is an empty slot; `Some(Some(bytes))` the raw
-/// five-byte stack entry (`short id; byte count; short damage`). Player
-/// windows in this scenario hold only untagged stacks: empty entries take
-/// two bytes (`FFFF`) and items five data bytes plus the single TAG_End
-/// (0x00) of the vanilla self-delimiting, uncompressed Slot NBT tail.
-fn slot36(body: &[u8]) -> Option<Option<[u8; 5]>> {
+/// seven-byte stack entry. Player windows in this scenario hold only
+/// untagged stacks, so empty entries take two bytes and items seven.
+fn slot36(body: &[u8]) -> Option<Option<[u8; 7]>> {
     if body.len() < 3 || body[0] != 0 {
         return None;
     }
@@ -412,37 +410,30 @@ fn slot36(body: &[u8]) -> Option<Option<[u8; 5]>> {
             }
             cursor += 2;
         } else {
-            if cursor + 6 > body.len() {
+            if cursor + 7 > body.len() {
                 return None;
             }
-            if body[cursor + 5] != 0 {
-                return None; // tagged stack: not expected in this scenario
-            }
-            let entry: [u8; 5] = body[cursor..cursor + 5].try_into().unwrap();
+            let entry: [u8; 7] = body[cursor..cursor + 7].try_into().unwrap();
             if index == 36 {
                 return Some(Some(entry));
             }
-            cursor += 6;
+            cursor += 7;
         }
     }
     None
 }
 
-/// Window entry for `count` ender eyes (381 = 0x017D, untagged; the
-/// self-delimiting tail is the single TAG_End byte checked by [`slot36`]).
-fn eye_entry(count: u8) -> [u8; 5] {
-    [1, 125, count, 0, 0]
+/// Window entry for `count` ender eyes (381 = 0x017D, no NBT).
+fn eye_entry(count: u8) -> [u8; 7] {
+    [1, 125, count, 0, 0, 255, 255]
 }
 
-fn wait_slot36(client: &mut BufferedClient, entry: [u8; 5], context: &str) {
+fn wait_slot36(client: &mut BufferedClient, entry: [u8; 7], context: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
-    let mut last: Option<Vec<u8>> = None;
     loop {
         assert!(
             Instant::now() < deadline,
-            "{context}: slot-36 eye update timed out; last 0x30 body: {:?} / want entry {:?}",
-            last,
-            entry
+            "{context}: slot-36 eye update timed out"
         );
         let Some((id, body)) = pump(client) else {
             continue;
@@ -453,11 +444,8 @@ fn wait_slot36(client: &mut BufferedClient, entry: [u8; 5], context: &str) {
         if id == 0x40 {
             panic!("{context}: disconnected: {body:?}");
         }
-        if id == 0x30 {
-            last = Some(body.clone());
-            if slot36(&body) == Some(Some(entry)) {
-                return;
-            }
+        if id == 0x30 && slot36(&body) == Some(Some(entry)) {
+            return;
         }
     }
 }

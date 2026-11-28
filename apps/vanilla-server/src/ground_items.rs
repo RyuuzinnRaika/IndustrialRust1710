@@ -128,9 +128,20 @@ impl GroundItem {
     fn metadata_body(&self) -> Vec<u8> {
         let mut metadata = self.id.to_be_bytes().to_vec();
         metadata.push((5 << 5) | 10); // item slot type 5, DataWatcher index 10
-                                      // The watched value is one ordinary Slot: vanilla carries the NBT
-                                      // uncompressed and self-delimiting (single TAG_End when absent).
-        crate::inventory::Inventory::encode_slot(&mut metadata, Some(self.stack));
+        metadata.extend_from_slice(&self.stack.id.to_be_bytes());
+        metadata.push(self.stack.count);
+        metadata.extend_from_slice(&self.stack.damage.to_be_bytes());
+        if let Some(nbt) = self
+            .stack
+            .nbt
+            .and_then(crate::item_nbt::wire)
+            .or_else(|| crate::books::wire_nbt(self.stack))
+        {
+            metadata.extend_from_slice(&(nbt.len() as i16).to_be_bytes());
+            metadata.extend_from_slice(&nbt);
+        } else {
+            metadata.extend_from_slice(&(-1i16).to_be_bytes());
+        }
         metadata.push(0x7f); // end of metadata
         metadata
     }
@@ -1068,7 +1079,7 @@ mod tests {
         assert_eq!(object.body[5], 2);
         assert_eq!(object.body.len(), 24);
         assert_eq!(metadata.id, 0x1c);
-        assert_eq!(&metadata.body[4..], &[0xaa, 0, 3, 1, 0, 0, 0, 127]);
+        assert_eq!(&metadata.body[4..], &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
         let [collect, destroy] = item.collected(42);
         assert_eq!(collect.id, 0x0d);
         assert_eq!(&collect.body[4..], &42i32.to_be_bytes());

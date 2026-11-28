@@ -615,7 +615,7 @@ fn add012_reconnect_never_allows_old_socket_to_overwrite_new_inventory_save() {
         item.extend_from_slice(&id.to_be_bytes());
         item.push(count);
         item.extend_from_slice(&0i16.to_be_bytes());
-        item.push(0); // no NBT: single TAG_End byte
+        item.extend_from_slice(&(-1i16).to_be_bytes());
         socket.write_all(&frame(0x10, &item)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
@@ -652,7 +652,7 @@ fn add012_reconnect_never_allows_old_socket_to_overwrite_new_inventory_save() {
     // Even though the old TCP handle still exists locally, the socket has
     // been shut down and cannot enqueue a stale Creative inventory mutation.
     assert!(stale
-        .write_all(&frame(0x10, &[0, 36, 0, 1, 64, 0, 0, 0]))
+        .write_all(&frame(0x10, &[0, 36, 0, 1, 64, 0, 0, 255, 255]))
         .is_err());
     current.shutdown(Shutdown::Both).unwrap();
     drop(current);
