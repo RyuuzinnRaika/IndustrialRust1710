@@ -18,3 +18,18 @@ vanilla-server --world ./world/flat.irw --backup-rotate ./backups 7
 - **J97:** Rust TCP integration tests are **not** proof of real Java 1.7.10 GUI behavior; the external-client acceptance harness remains pending.
 
 **Do not run an offline backup while another server is live**. Java servers may not cooperate with advisory OS locks, and a changing source can undermine snapshots. Retain independent backups before migration. Real-client tests and continuous live backup still need follow-up implementation and CI proof.
+
+### Restoring a native IRW backup safely (NEXT-168)
+
+Stop the server and select one complete, verified backup generation. Copy the
+whole generation into a **new** directory, not over an older save. Run
+`vanilla-server --verify-world <new-directory>/flat.irw` (use the actual IRW
+filename if different) before ever starting the server against that copy.
+
+The verifier refuses any pending IRW, chest, or furnace redo journal without
+replaying it. Unlike offline verification, server startup attempts replay and
+cannot distinguish a valid journal from another generation. If verification
+reports an unfinished journal, preserve the rejected tree and journal, and
+select a clean verified generation or investigate the original transaction
+offline. Do not mix files between generations or delete an unknown journal to
+force startup.
