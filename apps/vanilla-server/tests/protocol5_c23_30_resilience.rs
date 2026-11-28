@@ -180,9 +180,13 @@ fn inventory_item(window_items: &[u8], wanted: usize) -> Option<(i16, u8, i16)> 
         } else {
             let count = window_items[offset];
             let damage = i16::from_be_bytes([window_items[offset + 1], window_items[offset + 2]]);
-            let nbt = i16::from_be_bytes([window_items[offset + 3], window_items[offset + 4]]);
-            assert_eq!(nbt, -1, "unexpected NBT in bounded test item");
-            offset += 5;
+            // Vanilla Slot tail: TAG_End (0x00) when no NBT is attached.
+            assert_eq!(
+                window_items[offset + 3],
+                0,
+                "unexpected NBT in bounded test item"
+            );
+            offset += 4;
             Some((id, count, damage))
         };
         if slot == wanted {
@@ -197,7 +201,7 @@ fn creative_set(socket: &mut TcpStream, slot: i16, id: i16, count: u8) {
     packet.extend_from_slice(&id.to_be_bytes());
     packet.push(count);
     packet.extend_from_slice(&0i16.to_be_bytes());
-    packet.extend_from_slice(&(-1i16).to_be_bytes());
+    packet.push(0); // no NBT: single TAG_End byte
     socket.write_all(&frame(0x10, &packet)).unwrap();
     wait_for(socket, 0x2f, |p| {
         p.len() >= 3 && p[0] == 0 && p[1..3] == slot.to_be_bytes()

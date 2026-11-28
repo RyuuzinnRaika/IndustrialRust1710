@@ -212,7 +212,7 @@ fn creative_send(client: &mut Client, slot: i16, id: i16, count: u8) {
     p.extend_from_slice(&id.to_be_bytes());
     p.push(count);
     p.extend_from_slice(&0i16.to_be_bytes());
-    p.extend_from_slice(&(-1i16).to_be_bytes());
+    p.push(0); // no NBT: single TAG_End byte
     client.send(&frame(0x10, &p));
 }
 
@@ -233,14 +233,16 @@ fn window_item_ids(payload: &[u8]) -> Vec<i16> {
         ids.push(id);
         if id != -1 {
             at += 3; // count + damage
-            if at + 2 > payload.len() {
+            if at >= payload.len() {
                 break;
             }
-            let nbt = i16::from_be_bytes([payload[at], payload[at + 1]]);
-            at += 2;
-            if nbt > 0 {
-                at += nbt as usize;
+            // Vanilla Slot tail: a single TAG_End byte when no NBT is
+            // attached. These fixtures never tag items, so anything else
+            // stops the walk rather than being guessed.
+            if payload[at] != 0 {
+                break;
             }
+            at += 1;
         }
     }
     ids

@@ -2102,15 +2102,21 @@ impl Inventory {
                 out.extend_from_slice(&value.id.to_be_bytes());
                 out.push(value.count);
                 out.extend_from_slice(&value.damage.to_be_bytes());
-                if let Some(nbt) = value
+                // Vanilla Protocol 5: the Slot tail is *uncompressed,
+                // self-delimiting* NBT, or a single TAG_End byte (0x00)
+                // when absent. The arena and book store keep gzip blobs;
+                // decode at encode time, bounded by MAX_DECOMPRESSED. A
+                // blob that violates its own stored invariant is encoded
+                // as tag-less rather than corrupting the shared stream.
+                match value
                     .nbt
                     .and_then(crate::item_nbt::wire)
+                    .as_deref()
+                    .and_then(crate::item_nbt::uncompressed)
                     .or_else(|| crate::books::wire_nbt(value))
                 {
-                    out.extend_from_slice(&(nbt.len() as i16).to_be_bytes());
-                    out.extend_from_slice(&nbt);
-                } else {
-                    out.extend_from_slice(&(-1i16).to_be_bytes());
+                    Some(raw) => out.extend_from_slice(&raw),
+                    None => out.push(0),
                 }
             }
         }
@@ -4311,10 +4317,7 @@ mod tests {
             damage: 0,
             nbt: None,
         })));
-        assert_eq!(
-            inv.set_slot(36).unwrap(),
-            vec![0, 0, 36, 0, 4, 64, 0, 0, 255, 255]
-        );
+        assert_eq!(inv.set_slot(36).unwrap(), vec![0, 0, 36, 0, 4, 64, 0, 0, 0]);
         inv.select(1).unwrap();
         assert!(inv.held().is_none());
         assert!(!inv.can_place(Some(Stack {

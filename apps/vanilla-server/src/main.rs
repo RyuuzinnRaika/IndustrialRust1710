@@ -249,6 +249,20 @@ impl<'a> Input<'a> {
         }
         Ok(s.to_owned())
     }
+    /// Consume the vanilla Slot NBT tail: uncompressed, self-delimiting.
+    /// A single TAG_End byte (0x00) means absent; otherwise the envelope
+    /// walk locates the exact end of exactly one structure and that slice
+    /// is returned without interning, so callers can validate the item
+    /// identity *before* allocating an arena handle. Gzip-magic bytes are
+    /// rejected: vanilla never compresses the Slot tail.
+    fn raw_item_nbt(&mut self) -> io::Result<Option<&'a [u8]>> {
+        if self.0.first().copied() == Some(0) {
+            self.0 = &self.0[1..];
+            return Ok(None);
+        }
+        let end = item_nbt::scan_nbt_wire(self.0).map_err(|_| bad("malformed item NBT"))?;
+        self.take(end).map(Some)
+    }
     fn slot(&mut self) -> io::Result<Option<Stack>> {
         let id = self.i16()?;
         if id == -1 {
@@ -256,24 +270,21 @@ impl<'a> Input<'a> {
         }
         let count = self.u8()?;
         let damage = self.i16()?;
-        let nbt_length = self.i16()?;
         // A client snapshot is parsed, but never authorizes inventory mutation.
-        if nbt_length < -1 {
-            return Err(bad("invalid item NBT length"));
-        }
-        let nbt = if nbt_length >= 0 {
-            Some(item_nbt::intern(self.take(nbt_length as usize)?)?)
-        } else {
-            None
-        };
-        let stack = Stack {
+        let tag = self.raw_item_nbt()?;
+        let mut stack = Stack {
             id,
             count,
             damage,
-            nbt,
+            nbt: None,
         };
         if !stack.is_valid() {
             return Err(bad("invalid item ID, count or damage"));
+        }
+        if let Some(raw) = tag {
+            // Interning re-validates length, recompression bounds and the
+            // Compound root atomically; failure never mints a handle.
+            stack.nbt = Some(item_nbt::intern_uncompressed(raw)?);
         }
         Ok(Some(stack))
     }
@@ -288,18 +299,20 @@ impl<'a> Input<'a> {
         }
         let count = self.u8()?;
         let damage = self.i16()?;
-        let nbt_length = self.i16()?;
-        if nbt_length < -1 {
-            return Err(bad("invalid creative item NBT length"));
-        }
-        // Consume the exact declared length even when the item is invalid,
-        // so only a truncated packet is fatal. Validate the untagged identity
-        // BEFORE allocating an interned NBT handle for an untrusted packet.
-        let wire_nbt = if nbt_length >= 0 {
-            Some(self.take(nbt_length as usize)?)
-        } else {
-            None
+        // Consume exactly one vanilla envelope even when the item itself
+        // is invalid, so a well-framed packet always resynchronizes. A
+        // malformed or truncated envelope has no findable end: drop the
+        // rest of this frame's untrusted tail, reject the claim and let
+        // the caller resynchronize the window without disconnecting.
+        let tag = match self.raw_item_nbt() {
+            Ok(tag) => tag,
+            Err(_) => {
+                self.0 = &self.0[self.0.len()..];
+                return Ok(None);
+            }
         };
+        // Validate the untagged identity BEFORE allocating an interned
+        // NBT handle for an untrusted packet.
         let mut stack = Stack {
             id,
             count,
@@ -309,10 +322,10 @@ impl<'a> Input<'a> {
         if !stack.is_valid() {
             return Ok(None);
         }
-        if let Some(bytes) = wire_nbt {
-            // Intern validates compressed length, decompression bounds and
+        if let Some(raw) = tag {
+            // Interning validates raw length, recompression bounds and
             // the NBT Compound root; invalid tags are rejected atomically.
-            let Ok(handle) = item_nbt::intern(bytes) else {
+            let Ok(handle) = item_nbt::intern_uncompressed(raw) else {
                 return Ok(None);
             };
             stack.nbt = Some(handle);
@@ -322,21 +335,23 @@ impl<'a> Input<'a> {
     /// Protocol 5 Click Window carries a *client-reported* slot snapshot.
     /// The snapshot is never used to authorize a mutation, and may contain
     /// valid NBT even when the server-side Stack model cannot store tags yet.
-    /// Consume its exact length without converting or losing an item.
-    fn skip_untrusted_slot(&mut self) -> io::Result<()> {
+    /// Consume exactly one vanilla envelope without converting or losing an
+    /// item. Ok(false) reports a malformed or truncated snapshot whose
+    /// unbounded tail was dropped: the caller must reject the whole packet,
+    /// not merely ignore the tag.
+    fn skip_untrusted_slot(&mut self) -> io::Result<bool> {
         let id = self.i16()?;
         if id == -1 {
-            return Ok(());
+            return Ok(true);
         }
         self.take(3)?; // count + damage
-        let nbt_len = self.i16()?;
-        if nbt_len < -1 {
-            return Err(bad("invalid claimed item NBT length"));
+        match self.raw_item_nbt() {
+            Ok(_) => Ok(true),
+            Err(_) => {
+                self.0 = &self.0[self.0.len()..];
+                Ok(false)
+            }
         }
-        if nbt_len >= 0 {
-            self.take(nbt_len as usize)?;
-        }
-        Ok(())
     }
     fn finish(&self) -> io::Result<()> {
         if self.0.is_empty() {
@@ -372,7 +387,7 @@ mod server_input_utf16_tests {
             let mut wire = 264i16.to_be_bytes().to_vec();
             wire.push(count);
             wire.extend_from_slice(&0i16.to_be_bytes()); // metadata
-            wire.extend_from_slice(&(-1i16).to_be_bytes()); // no NBT
+            wire.push(0); // no NBT: single TAG_End byte
             let mut input = Input(&wire);
             assert_eq!(
                 input.creative_slot().unwrap(),
@@ -5504,7 +5519,15 @@ fn play(
                 let y = input.u8()? as i32;
                 let z = input.i32()?;
                 let face = input.i8()?;
-                let held = input.slot()?;
+                // add007-style policy: the held-item snapshot is untrusted
+                // and never authoritative. A malformed envelope inside this
+                // length-delimited frame rejects only the frame; the session
+                // stays alive for the next packet.
+                let held = match input.slot() {
+                    Ok(held) => held,
+                    Err(error) if error.kind() == ErrorKind::InvalidData => continue,
+                    Err(error) => return Err(error),
+                };
                 input.take(3)?; // cursor x/y/z
                 input.finish()?;
                 // #1318: vanilla spawn protection for every block-targeted
@@ -6954,8 +6977,15 @@ fn play(
                 let mode = input.i8()?;
                 // Client-provided clicked-item snapshots must never authorize
                 // an inventory change: all modifications are server-owned.
-                input.skip_untrusted_slot()?;
+                // add007-style policy: a malformed snapshot consumes the rest
+                // of this length-delimited frame and rejects the click; the
+                // authoritative window is resynchronized, not disconnected.
+                let snapshot_ok = input.skip_untrusted_slot()?;
                 input.finish()?;
+                if !snapshot_ok {
+                    send(s, 0x30, &inventory.window_items())?;
+                    continue;
+                }
                 let mut requested_window = window >= 0 && window as u8 == active_window;
                 let mut accepted = false;
                 let response_items;
@@ -12145,31 +12175,102 @@ mod tests {
     }
 
     #[test]
-    fn protocol5_slot_nbt_length_is_validated() {
+    fn protocol5_slot_wire_is_vanilla_self_delimiting_nbt() {
         let empty = [-1i16; 1]
             .into_iter()
             .flat_map(i16::to_be_bytes)
             .collect::<Vec<_>>();
         assert!(Input(&empty).slot().unwrap().is_none());
-        // Item id=1, count=1, damage=0, NBT=-1 (no tag).
-        let mut none = Input(&[0, 1, 1, 0, 0, 255, 255]);
-        assert_eq!(
-            none.slot().unwrap(),
+        // Issue #1317 golden: stone with no NBT is exactly
+        // 00 01 40 00 00 00 — no short length, TAG_End terminates the slot.
+        let mut out = Vec::new();
+        Inventory::encode_slot(
+            &mut out,
             Some(Stack {
                 id: 1,
-                count: 1,
+                count: 64,
+                damage: 0,
+                nbt: None,
+            }),
+        );
+        assert_eq!(out, vec![0x00, 0x01, 0x40, 0x00, 0x00, 0x00]);
+        assert_eq!(
+            Input(&out).slot().unwrap(),
+            Some(Stack {
+                id: 1,
+                count: 64,
                 damage: 0,
                 nbt: None,
             })
         );
-        none.finish().unwrap();
-        // An NBT-bearing client item must not be accepted as a bare stack.
-        assert!(Input(&[0, 1, 1, 0, 0, 0, 3, 0, 0, 0]).slot().is_err());
+        // A display-Name item embeds raw, uncompressed, self-delimiting
+        // NBT: TAG_Compound with an empty root name, then entries, ends 00.
+        use fastnbt::Value;
+        use std::collections::HashMap;
+        let tag = Value::Compound(HashMap::from([(
+            "display".to_owned(),
+            Value::Compound(HashMap::from([(
+                "Name".to_owned(),
+                Value::String("{\"text\":\"x\"}".to_owned()),
+            )])),
+        )]));
+        let handle = item_nbt::from_value(&tag).unwrap();
+        let mut out = Vec::new();
+        Inventory::encode_slot(
+            &mut out,
+            Some(Stack {
+                id: 276,
+                count: 1,
+                damage: 17,
+                nbt: Some(handle),
+            }),
+        );
+        assert_eq!(&out[..5], &[0x01, 0x14, 0x01, 0x00, 0x11]); // id 276, count 1, damage 17
+        assert_eq!(&out[5..8], &[0x0A, 0x00, 0x00]); // root TAG_Compound, empty name
+        assert_eq!(out[8], 0x0A); // TAG_Compound "display"
+        assert_eq!(&out[9..11], &[0x00, 0x07]);
+        assert!(out.windows(7).any(|w| w == b"display"));
+        assert!(out.windows(4).any(|w| w == b"Name"));
+        assert_eq!(&out[out.len() - 2..], &[0x00, 0x00]); // inner + root TAG_End
+                                                          // Reader roundtrip: the same tree, interned through the gzip arena.
+        let parsed = Input(&out).slot().unwrap().unwrap();
+        assert_eq!(parsed.id, 276);
+        assert_eq!(parsed.damage, 17);
+        assert_eq!(
+            item_nbt::value(parsed.nbt.unwrap()).unwrap(),
+            item_nbt::value(handle).unwrap()
+        );
+        // Truncation at every depth is rejected: header, root body, nested
+        // compound entry. The old dialect markers are also invalid now.
+        assert!(Input(&[0, 1, 1, 0, 0, 0x0A]).slot().is_err());
+        assert!(Input(&[0, 1, 1, 0, 0, 0x0A, 0x00]).slot().is_err());
+        assert!(Input(&[0, 1, 1, 0, 0, 0x0A, 0x00, 0x00]).slot().is_err());
+        assert!(Input(&[0, 1, 1, 0, 0, 0x0A, 0x00, 0x00, 0x0A, 0x00, 0x00])
+            .slot()
+            .is_err());
+        // Nested empty compounds terminate correctly when complete.
+        assert!(
+            Input(&[0, 1, 1, 0, 0, 0x0A, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x00])
+                .slot()
+                .is_ok()
+        );
+        // Gzip-magic client bytes are rejected: vanilla sends the raw stream.
+        assert!(Input(&[0, 1, 1, 0, 0, 0x1F, 0x8B, 8, 0, 0, 0])
+            .slot()
+            .is_err());
+        // The removed short-length dialect (absent marker and length form)
+        // must no longer parse. A legacy length-prefixed blob no longer reads
+        // as a tag: the first length byte is TAG_End and the remaining bytes
+        // desynchronize the payload, which finish() reports.
+        assert!(Input(&[0, 1, 1, 0, 0, 0xFF, 0xFE]).slot().is_err());
+        let mut legacy = Input(&[0, 1, 1, 0, 0, 0x00, 0x05, 0x0A, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(legacy.slot().unwrap().unwrap().nbt, None);
+        assert!(legacy.finish().is_err());
     }
     #[test]
     fn creative_c10_parses_vanilla_hotbar_without_losing_inventory() {
-        // Slot 36, stone x64, metadata 0, no NBT.
-        let payload = [0, 36, 0, 1, 64, 0, 0, 255, 255];
+        // Slot 36, stone x64, metadata 0, no NBT (single TAG_End byte).
+        let payload = [0, 36, 0, 1, 64, 0, 0, 0];
         let mut input = Input(&payload);
         let slot = input.i16().unwrap();
         let requested = input.creative_slot().unwrap().unwrap();
@@ -12178,10 +12279,7 @@ mod tests {
         assert!(inv.creative_set(slot, requested).unwrap());
         assert_eq!(inv.held().unwrap().id, 1);
         assert_eq!(inv.held().unwrap().count, 64);
-        assert_eq!(
-            inv.set_slot(36).unwrap(),
-            vec![0, 0, 36, 0, 1, 64, 0, 0, 255, 255]
-        );
+        assert_eq!(inv.set_slot(36).unwrap(), vec![0, 0, 36, 0, 1, 64, 0, 0, 0]);
         assert!(inv.encoded().is_ok());
 
         // Vanilla C10 can clear the same slot with -1 as the slot item ID.
@@ -12253,19 +12351,19 @@ mod tests {
         let inventory = Inventory::default();
         let original = inventory.clone();
 
-        // Valid item, but the claimed compressed NBT is not a gzip Compound.
-        let mut invalid_tag = Input(&[0, 1, 1, 0, 0, 0, 3, 10, 0, 0]);
+        // Valid item, but the tail is gzip-magic bytes, not the vanilla
+        // self-delimiting envelope: reject the claim and drop the frame.
+        let mut invalid_tag = Input(&[0, 1, 1, 0, 0, 0x1F, 0x8B, 8, 0, 0, 0]);
         assert_eq!(invalid_tag.creative_slot().unwrap(), None);
         invalid_tag.finish().unwrap();
         assert_eq!(inventory, original);
 
-        // Invalid item identity with an otherwise valid NBT blob: never mint.
+        // Invalid item identity with an otherwise valid raw envelope: never mint.
         let nbt = item_nbt::from_value(&fastnbt::Value::Compound(std::collections::HashMap::new()))
             .unwrap();
-        let bytes = item_nbt::wire(nbt).unwrap();
+        let bytes = item_nbt::uncompressed(&item_nbt::wire(nbt).unwrap()).unwrap();
         let mut claim = Vec::from(167i16.to_be_bytes());
         claim.extend_from_slice(&[1, 0, 0]);
-        claim.extend_from_slice(&(bytes.len() as i16).to_be_bytes());
         claim.extend_from_slice(&bytes);
         let mut invalid_id = Input(&claim);
         assert_eq!(invalid_id.creative_slot().unwrap(), None);
@@ -12275,20 +12373,28 @@ mod tests {
 
     #[test]
     fn creative_c10_tagged_or_invalid_items_do_not_disconnect_or_mint() {
-        // Tagged inventory items cannot be represented as a bare Stack in
-        // main yet. Do not disconnect and, especially, do not strip their NBT.
-        let tagged = [0, 36, 1, 147, 1, 0, 0, 0, 3, 10, 0, 0];
-        let mut input = Input(&tagged);
+        // A tagged stack with a truncated envelope has no findable end:
+        // the claim is rejected, the frame tail dropped, and the caller
+        // resynchronizes instead of disconnecting. Names/enchantments are
+        // never half-parsed or silently stripped.
+        let truncated = [0, 36, 0, 147, 1, 0, 0, 0x0A, 0x00];
+        let mut input = Input(&truncated);
         assert_eq!(input.i16().unwrap(), 36);
         assert_eq!(input.creative_slot().unwrap(), None);
         input.finish().unwrap();
 
+        // A complete vanilla envelope with a valid id is preserved intact.
+        let tagged = [0, 36, 0, 147, 1, 0, 0, 0x0A, 0x00, 0x00, 0x00];
+        let mut input = Input(&tagged);
+        assert_eq!(input.i16().unwrap(), 36);
+        let granted = input.creative_slot().unwrap().unwrap().unwrap();
+        input.finish().unwrap();
+        assert_eq!(granted.id, 147);
+        assert!(granted.nbt.is_some());
+
         // A modern ID or excess count is a rejected creative selection, not
         // an excuse to close a valid player's Protocol 5 connection.
-        for item in [
-            [0, 36, 1, 167, 1, 0, 0, 255, 255],
-            [0, 36, 0, 1, 65, 0, 0, 255, 255],
-        ] {
+        for item in [[0, 36, 1, 167, 1, 0, 0, 0], [0, 36, 0, 1, 65, 0, 0, 0]] {
             let mut input = Input(&item);
             assert_eq!(input.i16().unwrap(), 36);
             assert_eq!(input.creative_slot().unwrap(), None);
@@ -12298,31 +12404,52 @@ mod tests {
         let initial = inv.clone();
         assert!(!inv.creative_set(0, None).unwrap());
         assert_eq!(inv, initial);
+        // A malformed NBT envelope rejects the claim, keeping the session.
         let mut malformed = Input(&[0, 1, 1, 0, 0, 255, 254]);
-        assert!(malformed.creative_slot().is_err());
+        assert_eq!(malformed.creative_slot().unwrap(), None);
+        malformed.finish().unwrap();
+        // A fixed header truncated mid-field stays a fatal framing error.
+        assert!(Input(&[0, 1, 1, 0]).creative_slot().is_err());
     }
 
     #[test]
     fn click_window_ignores_untrusted_nbt_snapshot_without_disconnect() {
-        // 1.7.10 packet: item id, count, damage, signed NBT bytes length,
-        // NBT payload. It must be fully consumed but never become server state.
-        let mut snapshot = Input(&[0, 1, 1, 0, 0, 0, 3, 10, 0, 0]);
-        snapshot.skip_untrusted_slot().unwrap();
+        // 1.7.10 packet: item id, count, damage, vanilla self-delimiting
+        // NBT. It must be fully consumed but never become server state.
+        let mut snapshot = Input(&[0, 1, 1, 0, 0, 0x0A, 0x00, 0x00, 0x00]);
+        assert!(snapshot.skip_untrusted_slot().unwrap());
         snapshot.finish().unwrap();
 
+        // A tag-less snapshot terminates with a single TAG_End byte.
+        let mut absent = Input(&[0, 1, 1, 0, 0, 0x00]);
+        assert!(absent.skip_untrusted_slot().unwrap());
+        absent.finish().unwrap();
+
         // A zero/invalid item ID claim is not inventory authority.
-        let mut fake = Input(&[0x7f, 0x7f, 0xff, 0, 0, 0xff, 0xff]);
-        fake.skip_untrusted_slot().unwrap();
+        let mut fake = Input(&[0x7f, 0x7f, 0xff, 0, 0, 0x00]);
+        assert!(fake.skip_untrusted_slot().unwrap());
         fake.finish().unwrap();
 
-        let mut truncated = Input(&[0, 1, 1, 0, 0, 0, 4, 10, 0, 0]);
-        assert!(truncated.skip_untrusted_slot().is_err());
-        let mut illegal_length = Input(&[0, 1, 1, 0, 0, 0xff, 0xfe]);
-        assert!(illegal_length.skip_untrusted_slot().is_err());
+        // Malformed, truncated or gzip-compressed snapshots have no
+        // consumable structure: skip reports the rejection, consumes the
+        // frame tail and the caller resynchronizes without disconnecting.
+        for tail in [
+            [0x0A, 0x00].as_slice(),
+            &[0x0A, 0x00, 0x00],
+            &[0x0A, 0x00, 0x00, 0x0A, 0x00],
+            &[0x1F, 0x8B, 8, 0],
+            &[0xFF, 0xFE],
+        ] {
+            let mut bytes = vec![0, 1, 1, 0, 0];
+            bytes.extend_from_slice(tail);
+            let mut input = Input(&bytes);
+            assert!(!input.skip_untrusted_slot().unwrap(), "tail {tail:02X?}");
+            input.finish().unwrap();
+        }
 
-        // Creative inventory still rejects tagged stacks instead of silently
-        // stripping names/enchantments and minting an incorrect item.
-        assert!(Input(&[0, 1, 1, 0, 0, 0, 3, 10, 0, 0]).slot().is_err());
+        // The strict snapshot reader used by Use Item rejects a truncated
+        // envelope; the use-item handler drops only that frame.
+        assert!(Input(&[0, 1, 1, 0, 0, 0x0A, 0x00]).slot().is_err());
     }
     #[test]
     fn offline_uuid_is_deterministic() {

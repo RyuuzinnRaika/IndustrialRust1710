@@ -159,7 +159,7 @@ impl Client {
         body.extend_from_slice(&item.to_be_bytes());
         body.push(count);
         body.extend_from_slice(&0i16.to_be_bytes());
-        body.extend_from_slice(&(-1i16).to_be_bytes());
+        body.push(0); // no NBT: single TAG_End byte
         self.send(0x10, &body);
         let slot_bytes = slot.to_be_bytes();
         self.until(0x2f, |p| {
@@ -241,7 +241,7 @@ impl Client {
         body.extend_from_slice(&58i16.to_be_bytes()); // held: workbench
         body.push(1);
         body.extend_from_slice(&0i16.to_be_bytes());
-        body.extend_from_slice(&(-1i16).to_be_bytes());
+        body.push(0); // no NBT: single TAG_End byte
         body.extend_from_slice(&[8, 8, 8]);
         self.send(0x08, &body);
         let x_bytes = x.to_be_bytes();
@@ -271,9 +271,9 @@ fn parse_window_items(payload: &[u8]) -> Vec<Option<(i16, u8)>> {
         offset += 1;
         let _damage = i16::from_be_bytes(payload[offset..offset + 2].try_into().unwrap());
         offset += 2;
-        let nbt = i16::from_be_bytes(payload[offset..offset + 2].try_into().unwrap());
-        offset += 2;
-        assert_eq!(nbt, -1, "test items must not carry NBT");
+        // Vanilla Slot tail: TAG_End (0x00) when no NBT is attached.
+        assert_eq!(payload[offset], 0, "test items must not carry NBT");
+        offset += 1;
         slots.push(Some((id, amount)));
     }
     slots
